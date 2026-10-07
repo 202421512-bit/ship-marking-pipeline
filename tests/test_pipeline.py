@@ -45,3 +45,9 @@ def test_detects_single_marking_after_denoise():
     x, y, w, h = cv2.boundingRect(markings[0])
     assert abs(x - 50) <= 3 and abs(y - 50) <= 3
     assert abs(w - 101) <= 5 and abs(h - 51) <= 5
+
+
+def test_sync_check():
+    """팀원 git pull 동기화 확인용 테스트 (2026-10-08 추가)."""
+    message = "hello from pac2026"
+    assert message.startswith("hello")
