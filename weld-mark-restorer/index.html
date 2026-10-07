@@ -1,0 +1,160 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#ffffff" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <title>용접 표기 복원 도우미</title>
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <div class="phone" id="app">
+
+    <!-- ① 업로드 화면 -->
+    <section class="screen active" id="screen-upload">
+      <header class="hero">
+        <h1>용접 표기 복원 도우미</h1>
+        <p class="sub">철판의 용접 표기를 촬영하거나 업로드하세요</p>
+      </header>
+
+      <div class="card upload-card">
+        <div class="upload-illust" aria-hidden="true">
+          <svg viewBox="0 0 64 64" width="64" height="64"><rect x="6" y="14" width="52" height="38" rx="8" fill="none" stroke="currentColor" stroke-width="3"/><circle cx="32" cy="33" r="10" fill="none" stroke="currentColor" stroke-width="3"/><path d="M22 14l4-6h12l4 6" fill="none" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/></svg>
+        </div>
+        <p class="upload-text">녹·오염·흐릿한 분필 표기도 괜찮습니다.<br/>AI가 명료화 후 복원 후보를 제시합니다.</p>
+
+        <label class="btn btn-primary btn-xl">
+          <input type="file" accept="image/*" capture="environment" id="input-camera" hidden />
+          사진 촬영
+        </label>
+        <label class="btn btn-outline btn-xl">
+          <input type="file" accept="image/*" id="input-file" hidden />
+          이미지 업로드
+        </label>
+        <button class="btn btn-text" id="btn-sample" type="button">샘플 이미지로 체험하기</button>
+      </div>
+    </section>
+
+    <!-- ② 분석 결과 / 후보 선택 화면 -->
+    <section class="screen" id="screen-result">
+      <div class="scroll">
+        <header class="hero">
+          <h1>용접 표기 복원 도우미</h1>
+          <p class="sub">AI 추정 결과를 확인하세요</p>
+        </header>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>손상된 원본 표기</h3>
+            <button class="link" id="btn-change-photo" type="button">사진 변경</button>
+          </div>
+
+          <div class="compare" id="compare">
+            <img id="img-enhanced" alt="명료화된 이미지" />
+            <div class="compare-top" id="compare-top">
+              <img id="img-original" alt="손상된 원본 이미지" />
+            </div>
+            <div class="compare-handle" id="compare-handle"><span></span></div>
+            <span class="tag tag-left">원본</span>
+            <span class="tag tag-right">명료화</span>
+            <input type="range" min="0" max="100" value="50" id="compare-range" aria-label="원본/명료화 비교 위치" />
+          </div>
+
+          <div class="segment" role="tablist" aria-label="이미지 보기">
+            <button type="button" data-view="0">원본</button>
+            <button type="button" data-view="50" class="on">전/후 비교</button>
+            <button type="button" data-view="100">명료화</button>
+          </div>
+        </div>
+
+        <div class="info-box">
+          <span class="ico" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 2l2.2 6.3L20.5 10l-6.3 2.2L12 18.5l-2.2-6.3L3.5 10l6.3-1.7z" fill="currentColor"/><path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9z" fill="currentColor"/></svg>
+          </span>
+          <p>AI가 손상된 표기를 분석하여 가장 가능성이 높은 후보 2개를 생성했습니다.</p>
+        </div>
+
+        <h2 class="section-title">복원 후보</h2>
+        <div class="candidates" id="candidates"></div>
+
+        <div class="warn-box">
+          <span class="ico" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 3L2 21h20L12 3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="18" r="1.2" fill="currentColor"/></svg>
+          </span>
+          <p>두 후보 중 가장 적합한 표기를 작업자가 최종 판단합니다.</p>
+        </div>
+      </div>
+
+      <div class="bottom-bar">
+        <button class="btn btn-outline btn-lg" id="btn-reanalyze" type="button">다시 분석</button>
+        <button class="btn btn-primary btn-lg" id="btn-confirm" type="button" disabled>선택 완료</button>
+      </div>
+    </section>
+
+    <!-- ③ 작업 지시 화면 -->
+    <section class="screen" id="screen-order">
+      <div class="scroll">
+        <nav class="nav">
+          <button class="link back" id="btn-back" type="button">‹ 후보 다시 보기</button>
+        </nav>
+        <header class="hero">
+          <h1>작업 지시</h1>
+          <p class="sub">작업자가 선택한 표기를 기반으로 생성되었습니다</p>
+        </header>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>선택된 표기</h3>
+            <span class="pill pill-strong" id="order-conf"></span>
+          </div>
+          <div class="symbol-box" id="order-symbol"></div>
+          <p class="order-summary" id="order-summary"></p>
+          <dl class="meta">
+            <div><dt>최종 판단</dt><dd>작업자 직접 선택</dd></div>
+            <div><dt>선택 시각</dt><dd id="order-time"></dd></div>
+          </dl>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>작업 지시</h3>
+            <span class="muted" id="order-progress"></span>
+          </div>
+          <ol class="steps" id="order-steps"></ol>
+        </div>
+
+        <div class="warn-box">
+          <span class="ico" aria-hidden="true">
+            <svg viewBox="0 0 24 24" width="22" height="22"><path d="M12 3L2 21h20L12 3z" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"/><path d="M12 10v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="18" r="1.2" fill="currentColor"/></svg>
+          </span>
+          <p>AI 복원 결과는 참고용입니다. 도면과 다르면 작업을 중단하고 담당자에게 확인하세요.</p>
+        </div>
+      </div>
+
+      <div class="bottom-bar">
+        <button class="btn btn-outline btn-lg" id="btn-home" type="button">처음으로</button>
+        <button class="btn btn-primary btn-lg" id="btn-done" type="button" disabled>작업 확인 완료</button>
+      </div>
+    </section>
+
+    <!-- 로딩 -->
+    <div class="loading" id="loading" hidden>
+      <div class="loading-card">
+        <div class="spinner" aria-hidden="true"></div>
+        <p class="loading-title">AI 분석 중</p>
+        <ul class="loading-steps" id="loading-steps">
+          <li data-step="0">이미지 명료화</li>
+          <li data-step="1">표기 영역 검출</li>
+          <li data-step="2">손상 문자 추정</li>
+          <li data-step="3">복원 후보 생성</li>
+        </ul>
+      </div>
+    </div>
+
+    <div class="toast" id="toast" hidden></div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
