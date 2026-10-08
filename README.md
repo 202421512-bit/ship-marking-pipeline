@@ -60,3 +60,22 @@ ship-marking-pipeline/
 4. GitHub에서 **Pull Request** 를 만들고, CI가 초록불이면 merge 합니다.
 
 `main` 에 직접 push하지 말고 항상 브랜치 → PR 로 올려 주세요.
+
+## 마킹 분류 파이프라인
+
+| 단계 | 내용 | 코드 |
+|---|---|---|
+| 1 | 정형 / 비정형 분류 | (예정) |
+| 2 | 정형을 손상 / 비손상으로 구분 | (예정) |
+| 3 | 비정형에 필터를 적용해 "심하게 손상된 정형"일 가능성(score 0~1) 계산 | (예정) |
+| 4 | score가 높은 비정형을 정형(손상) 그룹으로 복귀 | `marking_pipeline/step4_return.py` |
+
+4단계 기준: `score >= 0.7` 정형(손상)으로 복귀, `0.5 <= score < 0.7` 비정형에 남기고 검토 표시, 그 외 비정형 유지.
+
+```bash
+python -m marking_pipeline.step4_return \
+    --markings markings.json --rescue step3_results.json --out regrouped.json
+```
+- `markings.json`: `[{"id": "U1", "group": "비정형", "damage": null, "text": "F6"}, ...]`
+- `step3_results.json`: `[{"marking_id": "U1", "score": 0.86, "reasons": ["획 두께 일정"]}, ...]`
+- 기준값은 `--return-threshold`, `--review-threshold`로 바꿀 수 있습니다.
