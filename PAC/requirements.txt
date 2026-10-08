@@ -1,0 +1,10 @@
+numpy==1.26.4
+scipy==1.13.1
+opencv-python==4.10.0.84
+scikit-image==0.24.0
+gudhi==3.13.0
+Pillow==10.4.0
+matplotlib==3.9.2
+PyQt6==6.7.1
+python-dotenv==1.0.1
+openai==1.52.2

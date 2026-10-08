@@ -1,0 +1,240 @@
+{
+  "status": "unparsed",
+  "reason": "Welding Symbol folder contains only PNG symbol drawings; no regulation / rule text (PDF, TXT, DOCX, CSV) was found. Meanings and rules are NOT generated.",
+  "symbols": [
+    {
+      "symbol": "all_around",
+      "display_name": "all around",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/all_around_01.png",
+        "data/input/Symbols/Welding Symbol/all_around_02.png",
+        "data/input/Symbols/Welding Symbol/all_around_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "bevel_groove",
+      "display_name": "bevel groove",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/bevel_groove_01.png",
+        "data/input/Symbols/Welding Symbol/bevel_groove_02.png",
+        "data/input/Symbols/Welding Symbol/bevel_groove_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "combined_example",
+      "display_name": "combined example",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/combined_example_01.png",
+        "data/input/Symbols/Welding Symbol/combined_example_02.png",
+        "data/input/Symbols/Welding Symbol/combined_example_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "concave_contour",
+      "display_name": "concave contour",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/concave_contour_01.png",
+        "data/input/Symbols/Welding Symbol/concave_contour_02.png",
+        "data/input/Symbols/Welding Symbol/concave_contour_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "convex_contour",
+      "display_name": "convex contour",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/convex_contour_01.png",
+        "data/input/Symbols/Welding Symbol/convex_contour_02.png",
+        "data/input/Symbols/Welding Symbol/convex_contour_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "field_weld",
+      "display_name": "field weld",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/field_weld_01.png",
+        "data/input/Symbols/Welding Symbol/field_weld_02.png",
+        "data/input/Symbols/Welding Symbol/field_weld_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "fillet_arrow_side",
+      "display_name": "fillet arrow side",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/fillet_arrow_side_01.png",
+        "data/input/Symbols/Welding Symbol/fillet_arrow_side_02.png",
+        "data/input/Symbols/Welding Symbol/fillet_arrow_side_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "fillet_both_sides",
+      "display_name": "fillet both sides",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/fillet_both_sides_01.png",
+        "data/input/Symbols/Welding Symbol/fillet_both_sides_02.png",
+        "data/input/Symbols/Welding Symbol/fillet_both_sides_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "fillet_other_side",
+      "display_name": "fillet other side",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/fillet_other_side_01.png",
+        "data/input/Symbols/Welding Symbol/fillet_other_side_02.png",
+        "data/input/Symbols/Welding Symbol/fillet_other_side_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "intermittent",
+      "display_name": "intermittent",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/intermittent_01.png",
+        "data/input/Symbols/Welding Symbol/intermittent_02.png",
+        "data/input/Symbols/Welding Symbol/intermittent_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "j_groove",
+      "display_name": "j groove",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/j_groove_01.png",
+        "data/input/Symbols/Welding Symbol/j_groove_02.png",
+        "data/input/Symbols/Welding Symbol/j_groove_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "plug_slot",
+      "display_name": "plug slot",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/plug_slot_01.png",
+        "data/input/Symbols/Welding Symbol/plug_slot_02.png",
+        "data/input/Symbols/Welding Symbol/plug_slot_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "seam",
+      "display_name": "seam",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/seam_01.png",
+        "data/input/Symbols/Welding Symbol/seam_02.png",
+        "data/input/Symbols/Welding Symbol/seam_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "spot",
+      "display_name": "spot",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/spot_01.png",
+        "data/input/Symbols/Welding Symbol/spot_02.png",
+        "data/input/Symbols/Welding Symbol/spot_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "square_groove",
+      "display_name": "square groove",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/square_groove_01.png",
+        "data/input/Symbols/Welding Symbol/square_groove_02.png",
+        "data/input/Symbols/Welding Symbol/square_groove_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "tail_wps",
+      "display_name": "tail wps",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/tail_wps_01.png",
+        "data/input/Symbols/Welding Symbol/tail_wps_02.png",
+        "data/input/Symbols/Welding Symbol/tail_wps_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "u_groove",
+      "display_name": "u groove",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/u_groove_01.png",
+        "data/input/Symbols/Welding Symbol/u_groove_02.png",
+        "data/input/Symbols/Welding Symbol/u_groove_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    },
+    {
+      "symbol": "v_groove",
+      "display_name": "v groove",
+      "meaning": null,
+      "rule": null,
+      "status": "unparsed",
+      "source_files": [
+        "data/input/Symbols/Welding Symbol/v_groove_01.png",
+        "data/input/Symbols/Welding Symbol/v_groove_02.png",
+        "data/input/Symbols/Welding Symbol/v_groove_03.png"
+      ],
+      "source_location": "filename (class label only)"
+    }
+  ]
+}
