@@ -1,0 +1,7 @@
+# 코드로 다시 만들 수 있는 파일 (샘플 이미지, 정답 마스크, 결과)
+data/samples/
+data/samples_gt/
+results/
+
+# 실제 현장 이미지 (기업 자료일 수 있으므로 Git에 올리지 않음)
+data/real/
