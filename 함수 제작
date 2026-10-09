@@ -1,0 +1,455 @@
+"""
+handwriting_features.py
+철판 마킹 ROI 한 장을 받아 '정형(인쇄) vs 비정형(손글씨)'을 판단하는 특징 추출 + 투표 판정 모듈.
+
+선택한 특징 (표 번호 기준)
+  1  획 두께 변화        f1_stroke_cv   = std(w)/mean(w),  w = 2·D(skeleton)
+  4  문자 간격 편차      f4_gap_cv      = std(g)/max(mean(g), 0.1·h_med)
+  5  기울기 변화         f5_slant_std   = std(θ_i)  [deg],  θ_i = 글자별 Hough 세로획(±20°) 각도의 길이 가중 평균
+  6  Baseline 흔들림     f6_baseline    = RMS(b_i − 직선) / h_med
+  8  곡률 변화           f8_curv_rough  = (κ 부호 변화 수 / 외곽선 길이)·h_med
+ 10  연결요소 크기 분산  f10_height_cv  = std(h_i)/mean(h_i)
+ 11  외곽선 불규칙도     f11_contour    = 원본 둘레 / 스무딩 둘레
+ 12  획 연결성           f12_merged     = (폭 > 1.3·h_med 요소 + 글자보다 큰 덩어리) / 전체 요소 수
+
+※ THRESHOLDS 의 값은 '시작값'입니다. 실제 사진 30~50장씩(인쇄/손글씨)으로
+  calibrate_thresholds() 를 돌려 다시 정하세요.
+
+사용법
+  python handwriting_features.py roi.png                # 특징값 + 판정 출력
+  python handwriting_features.py roi.png --debug out.png # 전처리 결과 시각화 저장
+  python handwriting_features.py roi.png --dark-marking  # 어두운 글씨 / 밝은 배경일 때
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import math
+from dataclasses import dataclass, field
+
+import cv2
+import numpy as np
+from scipy.ndimage import gaussian_filter1d
+
+# ---------------------------------------------------------------------------
+# 판정 기준 (시작값) : 값이 기준보다 크면 '손글씨 쪽' 1표
+# ---------------------------------------------------------------------------
+THRESHOLDS = {
+    "f1_stroke_cv": 0.20,
+    "f4_gap_cv": 0.25,
+    "f5_slant_std": 5.0,
+    "f6_baseline": 0.08,
+    "f8_curv_rough": 1.85,   # ※ 합성 데이터 기준. 실제 사진으로 반드시 재조정
+    "f10_height_cv": 0.12,
+    "f11_contour": 1.25,     # ※ 녹·잡음 영향 큼. 실제 사진으로 반드시 재조정
+    "f12_merged": 0.30,
+}
+
+# 특징별로 계산에 필요한 최소 글자(연결요소) 수
+MIN_CHARS = {
+    "f1_stroke_cv": 1,
+    "f4_gap_cv": 3,
+    "f5_slant_std": 2,
+    "f6_baseline": 3,
+    "f8_curv_rough": 1,
+    "f10_height_cv": 2,
+    "f11_contour": 1,
+    "f12_merged": 1,
+}
+
+
+# ---------------------------------------------------------------------------
+# 0. 공통 전처리
+# ---------------------------------------------------------------------------
+@dataclass
+class Prep:
+    binary: np.ndarray                  # uint8 0/255, 마킹 = 255
+    skeleton: np.ndarray                # uint8 0/1
+    dist: np.ndarray                    # float32 거리변환
+    boxes: list = field(default_factory=list)   # [(x, y, w, h, area, label)]
+    labels: np.ndarray | None = None
+    h_med: float = 0.0
+    removed_lines: list = field(default_factory=list)
+    big: list = field(default_factory=list)     # 글자보다 큰 덩어리 (글자+기호 연결)
+
+
+def _skeletonize(binary: np.ndarray) -> np.ndarray:
+    if hasattr(getattr(cv2, "ximgproc", None), "thinning"):   # opencv-contrib 설치 시
+        sk = cv2.ximgproc.thinning(binary, thinningType=cv2.ximgproc.THINNING_ZHANGSUEN)
+        return (sk > 0).astype(np.uint8)
+    from skimage.morphology import skeletonize
+    return skeletonize(binary > 0).astype(np.uint8)
+
+
+def _components(binary: np.ndarray, min_area: int):
+    n, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    boxes = []
+    for i in range(1, n):
+        x, y, w, h, a = stats[i]
+        if a >= min_area:
+            boxes.append((int(x), int(y), int(w), int(h), int(a), i))
+    return boxes, labels
+
+
+def preprocess(roi_bgr: np.ndarray, bright_marking: bool = True,
+               block_size: int | None = None, C: int = -10,
+               remove_lines: bool = True, line_ratio: float = 0.6) -> Prep:
+    """remove_lines : 용접기호 선·화살표 같은 긴 직선 제거 여부
+    line_ratio   : ROI 긴 변 대비 이 비율보다 긴 직선만 제거 (글자 세로획 보호)"""
+    gray = roi_bgr if roi_bgr.ndim == 2 else cv2.cvtColor(roi_bgr, cv2.COLOR_BGR2GRAY)
+    H, W = gray.shape
+
+    # 대비 보정
+    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+    g = clahe.apply(gray)
+    g = cv2.GaussianBlur(g, (3, 3), 0)
+    if not bright_marking:
+        g = 255 - g
+
+    # 적응형 이진화 : 주변보다 밝은 곳 = 마킹
+    if block_size is None:
+        block_size = max(15, (min(H, W) // 6) | 1)
+    binary = cv2.adaptiveThreshold(g, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                                   cv2.THRESH_BINARY, block_size, C)
+    k = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
+    binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k)
+
+    min_area = max(15, int(H * W * 0.0005))
+
+    # 1차 연결요소로 대략적인 글자 높이 추정
+    boxes, _ = _components(binary, min_area)
+    if boxes:   # 잡티에 끌려가지 않도록 큰 요소들만으로 높이 추정
+        amax = max(b[4] for b in boxes)
+        h0 = float(np.median([b[3] for b in boxes if b[4] >= 0.05 * amax]))
+    else:
+        h0 = H / 3
+
+    # 용접기호 선 / 화살표처럼 긴 직선 제거 (글자 높이 2배 & ROI 긴 변의 line_ratio 이상)
+    removed = []
+    min_len = int(max(2 * h0, line_ratio * max(H, W)))
+    lines = cv2.HoughLinesP(binary, 1, np.pi / 180, threshold=40,
+                            minLineLength=min_len, maxLineGap=5) if remove_lines else None
+    if lines is not None:
+        d = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+        sw = 2 * float(np.median(d[d > 0])) if np.any(d > 0) else 3
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            cv2.line(binary, (x1, y1), (x2, y2), 0, thickness=max(3, int(round(sw * 1.6))))
+            removed.append((int(x1), int(y1), int(x2), int(y2)))
+        binary = cv2.morphologyEx(binary, cv2.MORPH_OPEN, k)
+
+    # 2차 연결요소 : 잡티 제거 후 남은 마킹은 전부 binary 에 유지 (획 단위 특징 1·8·11 용)
+    #   글자 크기 요소만 boxes 로 (글자 단위 특징 4·5·6·10 용)
+    #   글자보다 훨씬 큰 덩어리(글자+기호가 이어 붙은 것)는 big 으로 따로 셈 (특징 12 용)
+    allc, labels = _components(binary, min_area)
+    keep = np.zeros_like(binary)
+    for b in allc:
+        keep[labels == b[5]] = 255
+    binary = keep
+    boxes, big = [], []
+    if allc:
+        hm = float(np.median([b[3] for b in allc]))
+        for b in allc:
+            if 0.35 * hm <= b[3] <= 2.0 * hm and b[2] <= 3.0 * hm:
+                boxes.append(b)
+            elif b[3] > 2.0 * hm or b[2] > 3.0 * hm:
+                big.append(b)
+    boxes.sort(key=lambda b: b[0] + b[2] / 2)   # 왼→오
+
+    if boxes:
+        h_med = float(np.median([b[3] for b in boxes]))
+    elif allc:
+        h_med = float(np.median([b[3] for b in allc]))
+    else:
+        h_med = 0.0
+
+    # 획 안쪽의 작은 구멍(녹·반사로 생긴 점) 메우기 → 골격선이 고리 모양으로 꼬이는 것 방지
+    if h_med > 0:
+        inv = cv2.bitwise_not(binary)
+        n, lab, st, _ = cv2.connectedComponentsWithStats(inv, connectivity=4)
+        hole_max = 0.02 * h_med * h_med
+        for i in range(1, n):
+            x, y, w, h, a = st[i]
+            touches = x == 0 or y == 0 or x + w == W or y + h == H
+            if not touches and a < hole_max:
+                binary[lab == i] = 255
+
+    skeleton = _skeletonize(binary)
+    dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+    return Prep(binary, skeleton, dist, boxes, labels, h_med, removed, big)
+
+
+# ---------------------------------------------------------------------------
+# 각 특징 함수
+# ---------------------------------------------------------------------------
+def _neighbor_count(skel: np.ndarray) -> np.ndarray:
+    k = np.ones((3, 3), np.float32); k[1, 1] = 0
+    return cv2.filter2D(skel.astype(np.float32), -1, k, borderType=cv2.BORDER_CONSTANT)
+
+
+def f1_stroke_width_cv(p: Prep) -> float:
+    """1. 획 두께 변화 : 골격선 위 두께 w = 2·D 의 변동계수 (끝점·갈림점 주변 제외)"""
+    sk = p.skeleton
+    if sk.sum() < 10:
+        return math.nan
+    nb = _neighbor_count(sk) * sk
+    special = ((nb == 1) | (nb >= 3)).astype(np.uint8) & sk
+    w_med = 2 * float(np.median(p.dist[sk > 0]))
+    r = max(3, int(round(w_med)) | 1)
+    special = cv2.dilate(special, cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (r, r)))
+    mask = (sk > 0) & (special == 0)
+    w = 2 * p.dist[mask]
+    if w.size < 10 or w.mean() == 0:
+        return math.nan
+    return float(w.std() / w.mean())
+
+
+def f4_gap_cv(p: Prep, word_gap: float = 0.3) -> float:
+    """4. 문자 간격 편차 : g_i = 다음 글자 왼쪽 − 현재 글자 오른쪽
+    단어 사이 띄어쓰기(F12 A23 의 공백)는 제외"""
+    b = p.boxes
+    if len(b) < 3 or p.h_med == 0:
+        return math.nan
+    gaps = np.array([b[i + 1][0] - (b[i][0] + b[i][2]) for i in range(len(b) - 1)], float)
+    gaps = np.clip(gaps, 0, None)
+    # 띄어쓰기 제외 : 중앙값의 2.5배 이상이면서 word_gap·h_med 이상인 간격
+    cut = max(2.5 * float(np.median(gaps)), word_gap * p.h_med)
+    gaps = gaps[gaps <= cut]
+    if len(gaps) < 2:
+        return math.nan
+    denom = max(gaps.mean(), 0.1 * p.h_med)   # 간격 평균이 0 근처일 때 폭주 방지
+    return float(gaps.std() / denom)
+
+
+def _char_slant_deg(skel_crop: np.ndarray, h: int) -> float | None:
+    """글자 하나의 세로획 기울기 (수직 기준, 오른쪽으로 기울면 +)"""
+    lines = cv2.HoughLinesP((skel_crop * 255).astype(np.uint8), 1, np.pi / 180,
+                            threshold=max(5, int(0.2 * h)),
+                            minLineLength=max(5, int(0.35 * h)), maxLineGap=2)
+    angs, lens = [], []
+    if lines is not None:
+        for x1, y1, x2, y2 in lines.reshape(-1, 4):
+            dx, dy = x2 - x1, y2 - y1
+            if dy < 0:
+                dx, dy = -dx, -dy
+            a = math.degrees(math.atan2(dx, dy))      # 0 = 수직
+            if abs(a) <= 20:      # 세로획만 (A, V 의 사선 획 제외)
+                angs.append(-a); lens.append(math.hypot(dx, dy))
+    if angs:
+        # 길이 가중 평균 : A·V 처럼 좌우 대칭 사선은 서로 상쇄되어 0° 근처가 됨
+        return float(np.average(angs, weights=lens))
+    return None                                   # 세로획 없는 글자는 제외
+
+
+def f5_slant_std(p: Prep) -> float:
+    """5. 기울기 변화 : 글자별 세로획 각도 θ_i 의 표준편차 [deg]"""
+    thetas = []
+    for x, y, w, h, _, lab in p.boxes:
+        crop = (p.labels[y:y + h, x:x + w] == lab).astype(np.uint8) & p.skeleton[y:y + h, x:x + w]
+        t = _char_slant_deg(crop, h)
+        if t is not None:
+            thetas.append(t)
+    if len(thetas) < 2:
+        return math.nan
+    return float(np.std(thetas))
+
+
+def f6_baseline_wobble(p: Prep) -> float:
+    """6. Baseline 흔들림 : 글자 아래끝을 직선 회귀한 잔차 RMS / h_med"""
+    if len(p.boxes) < 3 or p.h_med == 0:
+        return math.nan
+    xc = np.array([x + w / 2 for x, y, w, h, *_ in p.boxes], float)
+    yb = np.array([y + h for x, y, w, h, *_ in p.boxes], float)
+    a, c = np.polyfit(xc, yb, 1)
+    r = yb - (a * xc + c)
+    return float(np.sqrt(np.mean(r ** 2)) / p.h_med)
+
+
+def _outer_contours(p: Prep, min_pts: int = 20):
+    cnts, _ = cv2.findContours(p.binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    return [c[:, 0, :].astype(float) for c in cnts if len(c) >= min_pts]
+
+
+def f8_curvature_roughness(p: Prep, sigma_mult: float = 0.5) -> float:
+    """8. 곡률 변화 : 외곽선 곡률 κ = (x'y''−y'x'')/(x'²+y'²)^1.5 의 '부호 바뀜' 빈도
+    손글씨는 펜이 흔들려 볼록↔오목이 자주 바뀜.
+    값 = (κ 부호 변화 횟수 / 외곽선 길이) × h_med   (글자 높이당 변곡점 수)
+    스무딩 σ = 0.5 × 획 두께 (픽셀 계단 잡음 제거, 획 수준의 흔들림은 유지)"""
+    if p.h_med == 0:
+        return math.nan
+    d = p.dist[p.skeleton > 0]
+    sw = 2 * float(np.median(d)) if d.size else 3.0
+    sigma = max(2.0, sigma_mult * sw)
+    vals, wts = [], []
+    for c in _outer_contours(p):
+        x = gaussian_filter1d(c[:, 0], sigma, mode="wrap")
+        y = gaussian_filter1d(c[:, 1], sigma, mode="wrap")
+        dx, dy = np.gradient(x), np.gradient(y)
+        ddx, ddy = np.gradient(dx), np.gradient(dy)
+        kappa = (dx * ddy - dy * ddx) / np.power(dx ** 2 + dy ** 2 + 1e-9, 1.5)
+        sgn = np.sign(kappa)
+        changes = np.count_nonzero(sgn[1:] != sgn[:-1])
+        vals.append(changes / len(c) * p.h_med); wts.append(len(c))
+    if not vals:
+        return math.nan
+    return float(np.average(vals, weights=wts))
+
+
+def f10_height_cv(p: Prep) -> float:
+    """10. 연결요소 크기 분산 : 글자 높이의 변동계수"""
+    if len(p.boxes) < 2:
+        return math.nan
+    h = np.array([b[3] for b in p.boxes], float)
+    return float(h.std() / h.mean())
+
+
+def f11_contour_irregularity(p: Prep) -> float:
+    """11. 외곽선 불규칙도 : 원본 둘레 / 가우시안 스무딩 둘레"""
+    d = p.dist[p.skeleton > 0]
+    sw = 2 * float(np.median(d)) if d.size else 3.0
+    sigma = max(2.0, 0.5 * sw)
+    raw, smooth = 0.0, 0.0
+    for c in _outer_contours(p):
+        raw += cv2.arcLength(c.astype(np.float32).reshape(-1, 1, 2), True)
+        xs = gaussian_filter1d(c[:, 0], sigma, mode="wrap")
+        ys = gaussian_filter1d(c[:, 1], sigma, mode="wrap")
+        cs = np.stack([xs, ys], 1).astype(np.float32).reshape(-1, 1, 2)
+        smooth += cv2.arcLength(cs, True)
+    if smooth == 0:
+        return math.nan
+    return float(raw / smooth)
+
+
+def f12_merged_ratio(p: Prep, wide: float = 1.3) -> float:
+    """12. 획 연결성 : 이어 붙은 요소의 비율
+    (가로폭 > 1.3·h_med 인 글자 요소 + 글자보다 훨씬 큰 덩어리) / 전체 요소"""
+    total = len(p.boxes) + len(p.big)
+    if total == 0 or p.h_med == 0:
+        return math.nan
+    n_wide = sum(1 for b in p.boxes if b[2] > wide * p.h_med) + len(p.big)
+    return float(n_wide / total)
+
+
+FEATURE_FUNCS = {
+    "f1_stroke_cv": f1_stroke_width_cv,
+    "f4_gap_cv": f4_gap_cv,
+    "f5_slant_std": f5_slant_std,
+    "f6_baseline": f6_baseline_wobble,
+    "f8_curv_rough": f8_curvature_roughness,
+    "f10_height_cv": f10_height_cv,
+    "f11_contour": f11_contour_irregularity,
+    "f12_merged": f12_merged_ratio,
+}
+
+
+# ---------------------------------------------------------------------------
+# 특징 추출 + 판정
+# ---------------------------------------------------------------------------
+def extract_features(roi_bgr: np.ndarray, bright_marking: bool = True,
+                     prep: Prep | None = None) -> dict:
+    p = prep or preprocess(roi_bgr, bright_marking)
+    n = len(p.boxes)                 # 글자 크기 요소 수
+    n_all = n + len(p.big)           # 마킹 덩어리 전체 수
+    out = {}
+    for name, fn in FEATURE_FUNCS.items():
+        need = MIN_CHARS[name]
+        have = n_all if need == 1 else n
+        out[name] = fn(p) if have >= need else math.nan
+    out["n_chars"] = n
+    out["n_big"] = len(p.big)
+    out["h_med"] = p.h_med
+    return out
+
+
+def judge(features: dict, thresholds: dict = THRESHOLDS) -> dict:
+    """계산 가능한 특징 중 절반 이상이 기준을 넘으면 '비정형(손글씨)'"""
+    votes, detail = 0, {}
+    usable = 0
+    for k, th in thresholds.items():
+        v = features.get(k, math.nan)
+        if v is None or (isinstance(v, float) and math.isnan(v)):
+            detail[k] = None
+            continue
+        usable += 1
+        hit = v > th
+        votes += int(hit)
+        detail[k] = bool(hit)
+    score = votes / usable if usable else math.nan
+    label = "비정형(손글씨)" if usable and votes >= usable / 2 else "정형(인쇄)"
+    if usable == 0:
+        label = "판정불가"
+    return {"label": label, "votes": votes, "usable": usable,
+            "score": score, "detail": detail}
+
+
+def classify(roi_bgr: np.ndarray, bright_marking: bool = True,
+             thresholds: dict = THRESHOLDS) -> dict:
+    f = extract_features(roi_bgr, bright_marking)
+    return {"features": f, **judge(f, thresholds)}
+
+
+# ---------------------------------------------------------------------------
+# 기준값 재조정 (Youden J) : 인쇄/손글씨 ROI 특징값으로 특징별 최적 임계값 계산
+# ---------------------------------------------------------------------------
+def calibrate_thresholds(printed_feats: list[dict], hand_feats: list[dict]) -> dict:
+    new = {}
+    for k in THRESHOLDS:
+        a = np.array([f[k] for f in printed_feats if not math.isnan(f.get(k, math.nan))])
+        b = np.array([f[k] for f in hand_feats if not math.isnan(f.get(k, math.nan))])
+        if len(a) < 3 or len(b) < 3:
+            new[k] = THRESHOLDS[k]
+            continue
+        cands = np.unique(np.concatenate([a, b]))
+        best_j, best_t = -1.0, THRESHOLDS[k]
+        for t in cands:
+            tpr = np.mean(b > t)          # 손글씨를 손글씨로
+            tnr = np.mean(a <= t)         # 인쇄를 인쇄로
+            j = tpr + tnr - 1
+            if j > best_j:
+                best_j, best_t = j, float(t)
+        new[k] = best_t
+        print(f"{k:15s} 기준 {best_t:.4f}  (Youden J = {best_j:.2f})")
+    return new
+
+
+# ---------------------------------------------------------------------------
+# 디버그 시각화
+# ---------------------------------------------------------------------------
+def draw_debug(roi_bgr: np.ndarray, p: Prep) -> np.ndarray:
+    vis = roi_bgr.copy() if roi_bgr.ndim == 3 else cv2.cvtColor(roi_bgr, cv2.COLOR_GRAY2BGR)
+    for x1, y1, x2, y2 in p.removed_lines:
+        cv2.line(vis, (x1, y1), (x2, y2), (0, 0, 255), 1)          # 제거된 직선 = 빨강
+    vis[p.skeleton > 0] = (0, 255, 255)                            # 골격선 = 노랑
+    for x, y, w, h, *_ in p.big:
+        cv2.rectangle(vis, (x, y), (x + w, y + h), (255, 0, 255), 1)  # 큰 덩어리 = 보라
+    for i, (x, y, w, h, *_ ) in enumerate(p.boxes):
+        cv2.rectangle(vis, (x, y), (x + w, y + h), (0, 255, 0), 1)  # 글자 후보 = 초록
+        cv2.putText(vis, str(i), (x, max(10, y - 2)), cv2.FONT_HERSHEY_SIMPLEX,
+                    0.4, (0, 255, 0), 1)
+    bin3 = cv2.cvtColor(p.binary, cv2.COLOR_GRAY2BGR)
+    return np.hstack([vis, bin3])
+
+
+def main():
+    ap = argparse.ArgumentParser(description="정형/비정형(손글씨) 판정")
+    ap.add_argument("image")
+    ap.add_argument("--dark-marking", action="store_true", help="어두운 글씨/밝은 배경")
+    ap.add_argument("--debug", help="전처리 시각화 저장 경로")
+    a = ap.parse_args()
+
+    img = cv2.imread(a.image)
+    if img is None:
+        raise SystemExit(f"이미지를 열 수 없습니다: {a.image}")
+    p = preprocess(img, bright_marking=not a.dark_marking)
+    f = extract_features(img, prep=p)
+    res = judge(f)
+    print(json.dumps({"features": {k: (None if isinstance(v, float) and math.isnan(v)
+                                        else round(v, 4)) for k, v in f.items()},
+                      **res}, ensure_ascii=False, indent=2))
+    if a.debug:
+        cv2.imwrite(a.debug, draw_debug(img, p))
+        print("디버그 이미지 저장:", a.debug)
+
+
+if __name__ == "__main__":
+    main()
