@@ -1,0 +1,44 @@
+# PAC2 default configuration. Every value used by candidate generation / feature extraction is recorded here.
+seed: 42
+
+data:
+  source_dir: Source
+  classes: {formal: 0, handwritten: 1}      # formal = digitally rendered font text (Phase 1 audit); handwritten = photographed hand marking
+
+split:
+  test_per_class: {handwritten: 25, formal: 5}   # locked test (30) - not used before the final model is fixed
+  dev_folds: 5                                    # stratified 5-fold CV on the 90 development images
+
+candidates:
+  # every method is colour- and polarity-agnostic; none assumes a particular pen / chalk colour
+  methods: [gray_otsu, clahe_adaptive, lab_bg_distance, morph_hat]
+  primary: gray_otsu                # CHANGED in Phase 2 (was lab_bg_distance): on 43 px-high formal renders the text fills the
+                                    # median-blur window, the 'background' estimate contains the text and strokes break apart
+                                    # (reports/phase2/candidates_lab_bg_distance.png). Decided from mask quality, not from labels/accuracy.
+  clahe_clip: 2.0
+  clahe_tile: 8
+  adaptive_block_frac: 0.25         # adaptive threshold block = this x min(H, W), forced odd, >= 11
+  adaptive_c: 5
+  bg_median_frac: 0.5               # local background = median blur with kernel this x min(H, W)
+  hat_kernel_frac: 0.35             # top-hat / black-hat kernel = this x min(H, W)
+  open_kernel: 2                    # morphology opening kernel (px); 0 = none
+  min_cc_area_frac: 0.0015          # components smaller than this x image area are discarded as specks
+  min_cc_area_px: 8
+
+features:
+  min_skeleton_px: 10               # CV_w missing below this
+  min_components: 2                 # CV_h, CV_A, S_theta need at least this many components
+  min_gaps: 2                       # CV_g needs at least two gaps (one gap -> CV undefined)
+  min_baseline_points: 3            # B: two points always fit a line exactly -> missing, not 0
+  orientation_min_elongation: 1.3   # S_theta: components whose PCA axis ratio is below this have no stable direction
+  contour_smoothing_eps_frac: 0.02  # R: approxPolyDP epsilon = this x contour perimeter
+  contour_min_area_px: 20           # R: contours smaller than this are ignored
+  eps: 1.0e-6
+  pdf_reference_thresholds:         # initial values from the prompt (PDF not available locally) - NOT hard gates
+    CV_w: 0.25
+    CV_h: 0.12
+    CV_g: 0.20
+    S_theta: 7.5
+    B: 0.08
+    CV_A: 0.30
+    R: 0.08
