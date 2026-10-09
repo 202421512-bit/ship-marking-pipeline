@@ -19,8 +19,9 @@ stage1_denoise.py
 실행 방법 (VS Code 터미널, (venv) 상태에서)
   python src/stage1_denoise.py
 
-입력: data/samples/ 와 data/real/ 안의 모든 이미지
-출력: results/stage1/ 아래에
+입력: data/samples/, data/real/, data/team_examples/ 안의 모든 이미지
+      (team_examples는 하위 폴더까지 검색. 팀 단체방 예시 데이터셋을 풀어 넣는 곳)
+출력: results/stage1/ 아래에 (--no-autoscale 이면 results/stage1_noscale/)
   - <이름>_final.png   : 최종 결과 이미지
   - <이름>_compare.png : 단계별 비교 그림 (원본/1단계/2단계-①/최종)
   - metrics.csv        : 획 대비 수치 (정답 마스크가 있는 이미지만)
@@ -67,14 +68,38 @@ CONFIG = {
     "unsharp_amount": 1.0,       # 강조 세기
     "clahe2_clip": 2.0,
     "clahe2_tile": 8,
+
+    # --- 이미지 크기 자동 보정 (우리 선택, 논문에 없음) ---
+    #   위의 픽셀 단위 값(bil_d, bil_sigma_space, unsharp_sigma)은 긴 변 1600px 이미지 기준.
+    #   이미지가 더 작거나 크면 그 비율만큼 자동으로 줄이거나 늘림.
+    #   (1600px 이미지에서는 아무것도 바뀌지 않음 → 기존 실험 결과 그대로)
+    #   CLAHE 타일은 '칸 개수'라서 원래 크기와 무관하므로 보정하지 않음.
+    "auto_scale": True,
+    "ref_long_side": 1600,
 }
+
+
+def scaled_config(cfg, shape):
+    """이미지 크기에 맞춰 픽셀 단위 파라미터를 조정한 설정을 돌려줌. [우리 선택]"""
+    if not cfg.get("auto_scale"):
+        return cfg
+    s = max(shape[:2]) / cfg["ref_long_side"]
+    if abs(s - 1.0) < 1e-6:
+        return cfg
+    c = dict(cfg)
+    d = max(3, int(round(cfg["bil_d"] * s)))
+    c["bil_d"] = d if d % 2 == 1 else d + 1          # 필터 크기는 홀수로
+    c["bil_sigma_space"] = max(1.0, cfg["bil_sigma_space"] * s)
+    c["unsharp_sigma"] = max(0.5, cfg["unsharp_sigma"] * s)
+    return c
 
 
 # ------------------------------------------------------------------
 # 경로 설정
 # ------------------------------------------------------------------
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-INPUT_DIRS = [os.path.join(ROOT, "data", "samples"), os.path.join(ROOT, "data", "real")]
+INPUT_DIRS = [os.path.join(ROOT, "data", "samples"), os.path.join(ROOT, "data", "real"),
+              os.path.join(ROOT, "data", "team_examples")]
 GT_DIR = os.path.join(ROOT, "data", "samples_gt")
 OUT_DIR = os.path.join(ROOT, "results", "stage1")
 EXTS = (".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
@@ -131,6 +156,8 @@ def step2b_local_contrast(L, cfg):
 
 def run_pipeline(bgr, cfg):
     """전체 1차 노이즈 제거. 단계별 L 채널도 함께 돌려줌 (비교용)"""
+    cfg = scaled_config(cfg, bgr.shape)    # [우리 선택] 크기 보정 (끄면 그대로)
+
     # [논문 명시] LAB 변환 후 L / a / b 분리
     lab = cv2.cvtColor(bgr, cv2.COLOR_BGR2LAB)
     L, a, b = cv2.split(lab)
@@ -183,17 +210,30 @@ def save_compare(stages, title, path):
 
 
 def main():
-    os.makedirs(OUT_DIR, exist_ok=True)
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--no-autoscale", action="store_true", help="이미지 크기 자동 보정 끄기 (비교용)")
+    ap.add_argument("--only", choices=["samples", "real", "team_examples"], help="이 폴더만 처리")
+    args = ap.parse_args()
+
+    out_dir = OUT_DIR + ("_noscale" if args.no_autoscale else "")
+    if args.no_autoscale:
+        CONFIG["auto_scale"] = False
+    os.makedirs(out_dir, exist_ok=True)
+
     files = []
     for d in INPUT_DIRS:
+        if args.only and os.path.basename(d) != args.only:
+            continue
         if os.path.isdir(d):
-            files += [f for f in sorted(glob.glob(os.path.join(d, "*"))) if f.lower().endswith(EXTS)]
+            files += [f for f in sorted(glob.glob(os.path.join(d, "**", "*"), recursive=True))
+                      if f.lower().endswith(EXTS)]
     if not files:
         print("입력 이미지가 없습니다. data/samples 또는 data/real 폴더를 확인하세요.")
         return
 
     setting = (f"step1={CONFIG['step1_method']} | step2a={CONFIG['step2a_method']} | "
-               f"step2b={CONFIG['step2b_method']}")
+               f"step2b={CONFIG['step2b_method']} | autoscale={CONFIG['auto_scale']}")
     print("설정:", setting, "\n")
 
     rows = []
@@ -205,8 +245,8 @@ def main():
             continue
 
         out, stages, Ls = run_pipeline(img, CONFIG)
-        imwrite_any(os.path.join(OUT_DIR, name + "_final.png"), out)
-        save_compare(stages, f"{name}   [{setting}]", os.path.join(OUT_DIR, name + "_compare.png"))
+        imwrite_any(os.path.join(out_dir, name + "_final.png"), out)
+        save_compare(stages, f"{name}   [{setting}]", os.path.join(out_dir, name + "_compare.png"))
 
         # 정답 마스크가 있으면 획 대비 측정
         gt = os.path.join(GT_DIR, name + "_mask.png")
@@ -220,13 +260,13 @@ def main():
             print(f"{name:22s} 처리 완료 (정답 마스크 없음 → CNR 생략)")
 
     if rows:
-        with open(os.path.join(OUT_DIR, "metrics.csv"), "w", newline="", encoding="utf-8-sig") as fp:
+        with open(os.path.join(out_dir, "metrics.csv"), "w", newline="", encoding="utf-8-sig") as fp:
             w = csv.writer(fp)
             w.writerow(["setting", setting])
             w.writerow(["image", "CNR_original", "CNR_step1", "CNR_step2a", "CNR_final"])
             w.writerows(rows)
 
-    print("\n결과 저장 위치:", OUT_DIR)
+    print("\n결과 저장 위치:", out_dir)
 
 
 if __name__ == "__main__":

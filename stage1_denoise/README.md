@@ -24,6 +24,18 @@ python stage1_denoise/src/ablation.py         # 단계를 하나씩 끄고 비�
 ```
 
 실제 이미지는 `stage1_denoise/data/real/`에 넣으면 `stage1_denoise.py`가 함께 처리합니다 (Git에는 올라가지 않음).
+팀 예시 데이터셋(zip)은 `stage1_denoise/data/team_examples/`에 풀어 넣으면 하위 폴더까지 처리합니다 (Git에는 올라가지 않음).
+
+옵션:
+```
+python stage1_denoise/src/stage1_denoise.py --only team_examples   # 한 폴더만 처리 (samples / real / team_examples)
+python stage1_denoise/src/stage1_denoise.py --no-autoscale         # 크기 자동 보정 끄기 → results/stage1_noscale
+```
+
+### 이미지 크기 자동 보정 (우리 선택, 논문에 없음)
+픽셀 단위 파라미터(Bilateral d·sigmaSpace, Unsharp sigma)를 긴 변 1600px 기준으로 정하고,
+이미지 크기에 비례해 자동 조정합니다. 1600px 가상 이미지에서는 값이 바뀌지 않으므로 기존 실험 결과는 그대로입니다.
+CLAHE 타일은 '칸 개수'라 크기와 무관하여 보정하지 않습니다.
 
 ## 지금까지의 결과 요약 (가상 이미지 기준)
 
@@ -38,5 +50,6 @@ python stage1_denoise/src/ablation.py         # 단계를 하나씩 끄고 비�
 ## 알려진 이슈
 
 - 기본 파라미터는 1600×1200 가상 이미지 기준입니다. 팀 예시 데이터셋(640px 내외)처럼 작은 이미지에서는
-  Unsharp mask(sigma 3)가 상대적으로 넓게 걸려 글자 주변에 어두운 테두리(halo)가 생깁니다.
-  → 이미지 크기에 맞춰 파라미터를 자동 조정하는 기능을 추가할 예정입니다.
+  Unsharp mask(sigma 3)가 상대적으로 넓게 걸려 글자 주변에 어두운 테두리(halo)가 생겼습니다.
+  → 크기 자동 보정으로 halo가 줄었지만 완전히 없어지지는 않습니다.
+    대신 작은 이미지에서는 Bilateral 범위도 줄어 스크래치 등 배경 노이즈 억제가 약해지는 trade-off가 있습니다.

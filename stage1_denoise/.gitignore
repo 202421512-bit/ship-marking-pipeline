@@ -5,3 +5,6 @@ results/
 
 # 실제 현장 이미지 (기업 자료일 수 있으므로 Git에 올리지 않음)
 data/real/
+
+# 팀 단체방에서 받은 예시 데이터셋 (zip으로 공유되므로 Git에 중복으로 올리지 않음)
+data/team_examples/
