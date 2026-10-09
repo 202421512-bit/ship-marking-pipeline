@@ -10,10 +10,23 @@
 |---|---|---|
 | 1 | 평가용 가상 데이터 생성기 (`src/make_stage2_samples.py`) | 완료 |
 | 2 | 평가 코드 (`src/evaluate_stage2.py`, 인터페이스 `src/stage2_io.py`) | 완료 |
-| 3 | 문자 보호 마스크 | 예정 |
+| 3 | 문자 보호 마스크 (`src/protect_mask.py`, 평가 `src/eval_protect.py`) | 완료 |
 | 4 | 스크래치 검출 + 보수적 판정 + 선택적 제거 | 예정 |
 | 5 | 반사 영역 표시 | 예정 |
 | 6 | 파라미터 실험 · ablation | 예정 |
+
+## 최종 통합 구조 (녹·얼룩 포함)
+
+```
+입력(1차 결과) ─┬─ 공통 ① 문자 보호 마스크 (protect_mask.py)  ← 스크래치·녹·얼룩이 모두 사용
+               │      확실한 보호 / 의심 영역 / 나머지
+               ├─ 검출기: 스크래치 (MVP) │ 녹 (후속) │ 얼룩 (후속)   ← 서로 독립 모듈
+               ├─ 공통 ② 3단 판정: 제거 / 부분 제거 / 보존+불확실 표시
+               ├─ 반사 영역 표시 (MVP)
+               └─ 출력: 처리 이미지 + 검출·제거·불확실·반사 마스크 + needs_check (stage2_io.py)
+```
+- 녹·얼룩 검출기는 스크래치 MVP 이후 같은 인터페이스로 추가합니다. 평가는 노이즈 종류별로 따로 냅니다.
+- 마킹 방향은 `polarity` 설정(`bright` / `dark`)으로 분리했습니다. MVP는 밝은 마킹 기준이며, 최종 목표는 양쪽 지원입니다.
 
 ## 1단계: 가상 데이터 생성기 [우리 평가 도구, 논문 아님]
 
@@ -56,3 +69,16 @@ python stage2_structural/src/evaluate_stage2.py --method oracle_remove_all    # 
   반사로 가려진 보호 픽셀은 보존율 분모에서 제외하고 따로 집계.
 - **CER 인터페이스:** `run(..., ocr_fn=f)`에 `f(crops) -> [문자열]`을 넘기면 처리 전후 CER을 함께 계산.
 - 기준값(허용 거리 2px, 변화 판정 20)은 `EVAL_CFG`에 있으며 모두 [우리 설정]입니다.
+
+## 3단계: 문자 보호 마스크 (공통 모듈 ①)
+
+```
+python stage2_structural/src/eval_protect.py                 # 보호 마스크만 평가 + 미리보기
+python stage2_structural/src/eval_protect.py --boxes         # 정형 문자 박스를 함께 줄 때
+python stage2_structural/src/eval_protect.py --polarity dark # 어두운 마킹 기준
+```
+- 근거: 보호 마스크 구조 [논문 3], 지우지 말고 표시 [논문 4], Sauvola 이진화 [논문 9, scikit-image 문서의 공식].
+  Sauvola는 팀 공용 requirements를 바꾸지 않도록 OpenCV로 직접 구현했고 scikit-image와 결과를 대조했습니다.
+- 그 외(선 분리, 글자다움 규칙, 흐린 획 검출, 글자에 딸린 선 처리, 모든 임계값)는 [우리 선택]이며 `PROTECT_CFG`에 있습니다.
+- **주의:** `attach_radius`·`attach_frac`(화살표 등 글자에 딸린 선 판정)은 우리 생성기의 화살표 배치를 보고 정한 값이라,
+  실제 현장 기호 배치에서는 다시 확인해야 합니다.

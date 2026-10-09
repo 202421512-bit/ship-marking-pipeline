@@ -21,6 +21,8 @@ make_stage2_samples.py
   image.png               입력 이미지
   gt_text.png             문자 획
   gt_symbol.png           보호해야 하는 기호 (원, 화살표)
+  gt_text_faint.png       흐린 마킹(약 30%)의 문자·기호 획 위치 (gt_text ∪ gt_symbol의 부분집합)
+                          흐린 획 = 페인트 농도 0.22~0.42 + 군데군데 더 지워짐 [우리 설정]
   gt_marking_line.png     긴 굵은 직선 마킹 (C3만. 분필선·용접선으로 가정 → 보호 대상)
   gt_protect.png          보호 대상 전체 = 문자 ∪ 기호 ∪ 직선 마킹
   gt_scratch.png          스크래치 (보호 대상과 겹친 부분 포함)
@@ -50,6 +52,8 @@ CONDITIONS = ("C1_no_overlap", "C2_partial", "C3_hard")
 SEED_BASE = {"dev": 1000, "eval": 900000}      # 두 구간은 절대 겹치지 않음
 SEED_STRIDE = {"C1_no_overlap": 0, "C2_partial": 300, "C3_hard": 600}   # 조건별 시드 구간
 MAX_PER_CONDITION = 300                         # 위 구간 간격과 맞춤
+FAINT_PROB = 0.3                                # 마킹이 흐린 획(저대비·일부 지워짐)일 확률
+FAINT_ALPHA = (0.22, 0.42)                      # 흐린 획의 페인트 농도 범위 (선명한 획은 1.0)
 GLARE_SEED_MOD = (2, 5, 8)                      # 시드 끝자리가 이 값이면 반사 추가 → 조건마다 30%
 GLARE_LEVEL = 250                               # 이 밝기 이상이 '포화'
 
@@ -137,6 +141,7 @@ def place_markings(rng, condition):
             "color_bgr": list(PAINT_COLORS[int(rng.integers(len(PAINT_COLORS)))]),
             "box_xyxy": [int(xs.min()), int(ys.min()), int(xs.max()) + 1, int(ys.max()) + 1],
             "box_rotated": [[round(v, 1) for v in p] for p in cv2.boxPoints(rect).tolist()],
+            "faint": bool(rng.random() < FAINT_PROB),
             "_t": t_layer, "_s": s_layer,
         })
     return marks
@@ -280,8 +285,18 @@ def make_one(seed, condition):
     marks = place_markings(rng, condition)
     gt_text = np.zeros((H, W), np.uint8)
     gt_symbol = np.zeros((H, W), np.uint8)
+    gt_faint = np.zeros((H, W), np.uint8)
     for mk in marks:
-        alpha = (np.maximum(mk["_t"], mk["_s"]).astype(np.float32) / 255.0)[..., None]
+        shape = np.maximum(mk["_t"], mk["_s"]).astype(np.float32) / 255.0
+        if mk["faint"]:
+            # 흐린 획: 페인트가 옅고(저대비) 군데군데 더 지워진 상태 [우리 설정]
+            patchy = cv2.GaussianBlur(rng.random((H, W)).astype(np.float32), (0, 0), 8)
+            patchy = (patchy - patchy.min()) / (np.ptp(patchy) + 1e-6)
+            strength = rng.uniform(*FAINT_ALPHA) * np.clip(0.35 + patchy, 0, 1)
+            mk["faint_alpha_mean"] = round(float(strength[shape > 0.5].mean()), 3)
+            shape = shape * strength
+            gt_faint = np.maximum(gt_faint, (np.maximum(mk["_t"], mk["_s"]) > 127).astype(np.uint8) * 255)
+        alpha = shape[..., None]
         img = img * (1 - alpha) + np.array(mk["color_bgr"], np.float32) * alpha
         gt_text = np.maximum(gt_text, (mk["_t"] > 127).astype(np.uint8) * 255)
         gt_symbol = np.maximum(gt_symbol, (mk["_s"] > 127).astype(np.uint8) * 255)
@@ -344,9 +359,10 @@ def make_one(seed, condition):
             "preexisting_damage": int((pre > 0).sum()), "protect_intact": int((intact > 0).sum()),
             "glare": int((gt_glare > 0).sum()),
             "protect_in_glare": int(((gt_protect > 0) & (gt_glare > 0)).sum()),
+            "faint": int((gt_faint > 0).sum()),
         },
     }
-    masks = {"gt_text": gt_text, "gt_symbol": gt_symbol, "gt_marking_line": gt_line,
+    masks = {"gt_text": gt_text, "gt_symbol": gt_symbol, "gt_text_faint": gt_faint, "gt_marking_line": gt_line,
              "gt_protect": gt_protect, "gt_scratch": gt_scratch,
              "gt_preexisting_damage": pre, "gt_protect_intact": intact, "gt_glare": gt_glare}
     return img, masks, meta

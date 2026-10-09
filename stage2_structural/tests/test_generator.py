@@ -16,7 +16,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(
 import make_stage2_samples as gen  # noqa: E402
 
 N_PER_COND = 3          # 테스트용 소량 생성 (조건당 3장)
-MASKS = ["gt_text", "gt_symbol", "gt_marking_line", "gt_protect", "gt_scratch",
+MASKS = ["gt_text", "gt_symbol", "gt_text_faint", "gt_marking_line", "gt_protect", "gt_scratch",
          "gt_preexisting_damage", "gt_protect_intact", "gt_glare"]
 
 
@@ -114,3 +114,20 @@ def test_seed_split_and_determinism():
     a, _, _ = gen.make_one(1234, "C2_partial")
     b, _, _ = gen.make_one(1234, "C2_partial")
     assert np.array_equal(a, b)
+
+
+# 8. 흐린 획: 문자·기호의 부분집합이고, 전체 마킹의 약 30%이며, 배경 대비가 선명한 획의 60% 미만
+def test_faint_strokes(dataset):
+    n_mark = n_faint = 0
+    for cond, i, m, meta in all_samples(dataset):
+        assert not (m["gt_text_faint"] & ~(m["gt_text"] | m["gt_symbol"])).any(), (cond, i)
+        n_mark += len(meta["markings"])
+        n_faint += sum(mk["faint"] for mk in meta["markings"])
+        img = cv2.imread(os.path.join(dataset, "dev", cond, f"{i:03d}", "image.png"))
+        L8 = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)[..., 0]
+        contrast = L8.astype(float) - cv2.medianBlur(L8, 61).astype(float)   # 주변 배경 대비 밝기
+        base = m["gt_protect_intact"] & ~m["gt_glare"]
+        faint, clear = base & m["gt_text_faint"], base & ~m["gt_text_faint"] & ~m["gt_marking_line"]
+        if faint.sum() > 200 and clear.sum() > 200:
+            assert contrast[faint].mean() < 0.6 * contrast[clear].mean(), (cond, i)
+    assert n_faint >= 1 and 0.1 <= n_faint / n_mark <= 0.55, (n_faint, n_mark)
