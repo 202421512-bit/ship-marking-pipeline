@@ -9,7 +9,7 @@
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | 1 | 평가용 가상 데이터 생성기 (`src/make_stage2_samples.py`) | 완료 |
-| 2 | 평가 코드 (획 보존율, 검출/제거 성능 분리, 처리 시간, CER 인터페이스) | 예정 |
+| 2 | 평가 코드 (`src/evaluate_stage2.py`, 인터페이스 `src/stage2_io.py`) | 완료 |
 | 3 | 문자 보호 마스크 | 예정 |
 | 4 | 스크래치 검출 + 보수적 판정 + 선택적 제거 | 예정 |
 | 5 | 반사 영역 표시 | 예정 |
@@ -37,3 +37,22 @@ pytest stage2_structural/tests -v                                      # 자동 
   추후 OCR CER 평가와 정형 문자 박스 입력에 사용합니다.
 
 생성된 데이터(`data/`)와 결과(`results/`)는 Git에 올리지 않습니다. 같은 시드로 언제든 똑같이 다시 만들 수 있습니다.
+
+## 2단계: 평가 코드 [우리 평가 도구, 논문 아님]
+
+```
+python stage2_structural/src/evaluate_stage2.py --method identity             # 아무것도 안 함 (기준선)
+python stage2_structural/src/evaluate_stage2.py --method oracle_conservative  # 정답 사용, 겹친 부분 남김 (이상적 보수 제거)
+python stage2_structural/src/evaluate_stage2.py --method oracle_remove_all    # 정답 사용, 겹친 부분까지 지움 (공격적 제거)
+```
+`oracle_*`는 정답을 쓰는 **평가 코드 점검용 기준선**이지 알고리즘이 아닙니다.
+
+- **인터페이스:** 2차 방법은 `method(image, protect_boxes=None) -> Stage2Result`
+  (처리 이미지 + 검출/제거/불확실/반사 마스크 + needs_check + report). 기존 OCR 모듈과 독립.
+- **검출 성능과 제거 성능 분리:** 검출 = `detect_mask` vs 스크래치 정답,
+  제거 = `remove_mask` vs (스크래치 − 보호 대상). 허용 거리(2px) 지표는 보호 대상 위 제거를 봐주지 않음.
+- **손상 구분:** 알고리즘 손상 = 입력에서 온전했던 보호 픽셀 중 지웠거나(선언) 밝기가 20 이상 바뀐(실측) 픽셀.
+  기존 손상(입력 단계에서 스크래치가 덮은 획)과 그중 알고리즘이 지운 픽셀은 따로 집계.
+  반사로 가려진 보호 픽셀은 보존율 분모에서 제외하고 따로 집계.
+- **CER 인터페이스:** `run(..., ocr_fn=f)`에 `f(crops) -> [문자열]`을 넘기면 처리 전후 CER을 함께 계산.
+- 기준값(허용 거리 2px, 변화 판정 20)은 `EVAL_CFG`에 있으며 모두 [우리 설정]입니다.
