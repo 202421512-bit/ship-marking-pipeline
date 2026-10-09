@@ -1,0 +1,3 @@
+{
+  "rewrites": [{ "source": "/(.*)", "destination": "/weld-mark-restorer/$1" }]
+}

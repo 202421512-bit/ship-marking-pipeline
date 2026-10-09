@@ -1,0 +1,9 @@
+{
+  "name": "weld-mark-restorer",
+  "version": "0.1.0",
+  "private": true,
+  "description": "용접 표기 복원 도우미 - 모바일 웹 프로토타입 (MVP, mock AI)",
+  "scripts": {
+    "start": "node dev-server.js"
+  }
+}
