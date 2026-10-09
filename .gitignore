@@ -21,3 +21,6 @@ Thumbs.db
 
 # 실행 결과물 (원본 데이터가 아니라 파이프라인 출력)
 outputs/
+
+# 데모 실행 결과
+result.jpg
