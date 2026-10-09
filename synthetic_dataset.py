@@ -11,7 +11,7 @@
   글자마다: 가는 중심선 -> 떨림(법선 방향 매끈한 변위) -> 필압(반경이 매끈하게 변하는 원 찍기)
   -> 방향 전환점(모서리) 잉크 뭉침 -> 글자별 기울기·크기 -> 바닥선·간격 흔들림 -> 확률적 이어 쓰기
   -> 테두리 거칠기
-현장 노이즈 (공통): 숏블라스트 요철, 반사광(조도 불균일), 녹 반점, 긁힘 선
+현장 노이즈 (공통): 숏블라스트 요철, 완만한 조도 불균일, 녹 반점, 긁힘 선 (포화 반사광은 다루지 않음)
 
 이 데이터는 판별 특징을 만들 때 쓴 생성기와 같은 계열이라 성능이 실제보다 낙관적으로 나온다.
 현장 라벨 사진으로 반드시 다시 검증할 것.
@@ -200,17 +200,12 @@ def handwritten(text, rng, link_prob=None):
 # 현장 노이즈
 # ---------------------------------------------------------------------------
 def field_noise(img, rng):
-    """숏블라스트 요철(고주파 잡음 + 미세 패턴), 반사광(조도 불균일), 녹 반점, 긁힘."""
+    """숏블라스트 요철(고주파 잡음 + 미세 패턴), 완만한 조도 불균일, 녹 반점, 긁힘."""
     h, w = img.shape
     out = img.astype(np.float32)
     out += rng.normal(0, rng.uniform(5, 10), out.shape)
     out += cv2.GaussianBlur(rng.normal(0, 12, out.shape).astype(np.float32), (0, 0), 1.2)
     yy, xx = np.mgrid[0:h, 0:w]
-    for _ in range(int(rng.integers(1, 3))):                       # 반사광 얼룩
-        cx, cy, r = rng.uniform(0, w), rng.uniform(0, h), rng.uniform(0.1, 0.3) * w
-        # 대부분은 포화 직전까지, 일부(약 15%)만 강한 포화 반사광 (신뢰도 C 가 떨어지는 경우 시험)
-        peak = rng.uniform(55, 80) if rng.random() < 0.15 else rng.uniform(10, 35)
-        out += peak * np.exp(-((xx - cx) ** 2 + (yy - cy) ** 2) / (2 * r * r))
     out += rng.uniform(-20, 20) * (xx / w - 0.5)                   # 완만한 조도 기울기
     for _ in range(int(rng.integers(30, 90))):                     # 녹 반점
         cv2.circle(out, (int(rng.integers(0, w)), int(rng.integers(0, h))), int(rng.integers(1, 3)),
@@ -219,6 +214,32 @@ def field_noise(img, rng):
         y1, y2 = rng.uniform(0, h, 2)
         cv2.line(out, (0, int(y1)), (w - 1, int(y2)), float(rng.uniform(80, 150)), 1, cv2.LINE_AA)
     return np.clip(out, 0, 255).astype(np.uint8)
+
+
+MARKING_COLORS = {"yellow": (20, 205, 235), "white": (232, 232, 228), "black": (38, 38, 42)}   # BGR
+
+
+def colorize(gray, marking, rng, rust_patches=(3, 8)):
+    """회색 합성 영상(잉크 < 120) -> 컬러 강판: 청회색 강판 + 블라스트 질감, 적갈색 녹 얼룩, 마킹 색.
+    (컬러 영상, 정답 잉크 마스크) 반환."""
+    h, w = gray.shape
+    ink = gray < 120
+    steel = np.array([128, 124, 118], np.float32) + rng.normal(0, 3, 3)
+    out = np.ones((h, w, 3), np.float32) * steel
+    out += cv2.GaussianBlur(rng.normal(0, 10, (h, w)).astype(np.float32), (0, 0), 1.0)[..., None]   # 블라스트 질감
+    for _ in range(int(rng.integers(*rust_patches))):               # 녹 얼룩 (회색으로 보면 어두워 잉크처럼 보임)
+        cx, cy = rng.uniform(0, w), rng.uniform(0, h)
+        r = rng.uniform(0.03, 0.09) * w
+        yy, xx = np.mgrid[0:h, 0:w]
+        blob = np.exp(-(((xx - cx) / r) ** 2 + ((yy - cy) / (r * rng.uniform(0.5, 1.5))) ** 2))
+        blob *= cv2.GaussianBlur(rng.random((h, w)).astype(np.float32), (0, 0), 2) > 0.45
+        rust = np.array([35, 70, 135], np.float32)
+        out = out * (1 - blob[..., None] * 0.85) + rust * blob[..., None] * 0.85
+    color = np.array(MARKING_COLORS[marking], np.float32)
+    soft = cv2.GaussianBlur(ink.astype(np.float32), (0, 0), 0.7)[..., None]
+    out = out * (1 - soft) + color * soft
+    out += rng.normal(0, 4, out.shape)
+    return np.clip(out, 0, 255).astype(np.uint8), ink
 
 
 def make_sample(label, rng, kind=None):

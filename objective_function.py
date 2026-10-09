@@ -1,16 +1,27 @@
 """
-수기 판별 목적함수: 8개 특징 φ₁~φ₈ 를 가중 합해 수기 점수 S_hand ∈ [0, 1] 과 신뢰도 C, 판정을 낸다.
+수기 판별 목적함수 (2단계 계층형)
+
+  0단계  (선택) 색상 전처리 (color_preprocess, color="auto" 등): 녹을 가리고 배경 대비 색 거리로 마킹을 부각한
+         회색 영상을 만든다. 기본은 끔 (회색 영상 그대로) - 아래 color 인자 설명 참고.
+  1단계  기계 패턴 사전 판별 (mechanical_pattern_detector): 도트 매트릭스·스텐실이 검출되면 φ 계산 없이
+         인쇄체로 조기 확정.
+         - 도트·스텐실은 획 기반 지표(φ₁·φ₅·φ₆·φ₇·φ₈)를 거꾸로 움직이므로 2단계에 들어가면 안 된다.
+  2단계  8개 특징 φ₁~φ₈ 를 가중 합해 수기 점수 S_hand ∈ [0, 1] 과 신뢰도 C, 판정을 낸다.
 
   S_hand = Σ_{i∈유효} w_i φ_i / Σ_{i∈유효} w_i
     - 가중치 w 는 benchmark_and_optimize.py 가 데이터로 구해 objective_weights.json 에 저장한다
       (없으면 균등 가중치).
     - 동적 재분배: 글자가 1개뿐이라 φ₂(간격)·φ₄(기준선)·φ₆(크기)·φ₃(기울기) 가 None 이면 그 항을 빼고
       남은 지표의 가중치 합이 1 이 되게 비례 재할당한다.
-  신뢰도 C = C_glare × C_contrast × C_coverage ∈ [0, 1]
-    - C_glare   : 반사광 포화(≥ 250) 픽셀 비율이 클수록 낮음
+  목적: 받은 영상의 표기가 수기인지 판별한다. 판정은 점수(와 1단계 패턴)로만 내리고 신뢰도에 묶지 않는다.
+  반사광은 복원·보정하지 않는다. 대신 안전장치로, 글자 영역의 포화 픽셀(V > 245) 비율이 15% 를 넘으면
+  획이 뭉개져 점수가 왜곡되므로 계산하지 않고 flag "REJECTED_SPECULAR_NOISE" 와 Uncertain 을 바로 돌려준다.
+  큰 사진(휴대폰 원본 등)은 긴 변 WORK_LONG_SIDE 로 줄여서 분석한다. 영상 품질에 대한 신뢰도 평가는 이후 별도 단계에서
+  하며, 그 단계에서 쓸 수 있도록 참고 신뢰도 C 를 함께 돌려준다:
+  참고 신뢰도 C = C_contrast × C_mask × C_coverage ∈ [0, 1]
     - C_contrast: 배경-획 대비 잡음비 CNR = |배경 중앙값 − 획 중앙값| / 배경 표준편차 가 낮을수록 낮음
     - C_coverage: 계산된 지표의 가중치 비율 (지표가 많이 빠질수록 낮음)
-  판정: C < C_MIN 이거나 S 가 두 임계값 사이면 "Low Confidence (Need Review)",
+  판정: S 가 두 임계값 사이(완충 구간)면 "Uncertain (Need Review)",
         S ≥ 수기 임계값이면 "Confirmed Handwritten", S ≤ 인쇄체 임계값이면 "Confirmed Printed".
 """
 import json
@@ -21,9 +32,12 @@ import cv2
 import numpy as np
 
 from baseline_feature import calculate_phi_4_baseline
+from color_preprocess import preprocess_color, text_region_penalty
+from layout import analyze_layout
 from connectivity_feature import calculate_phi_8_connectivity
 from contour_roughness_feature import calculate_phi_7_roughness
 from curvature_feature import calculate_phi_5_curvature
+from mechanical_pattern_detector import detect_mechanical_pattern
 from orientation_feature import _remove_specks, binarize, calculate_phi_3_orientation, load_image
 from size_variance_feature import calculate_phi_6_size_variance
 from spacing_feature import calculate_phi_2_spacing
@@ -37,11 +51,12 @@ FEATURE_NAMES = {
 WEIGHTS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "objective_weights.json")
 
 # 신뢰도 / 판정 (benchmark_and_optimize.py 가 임계값을 데이터로 정해 json 에 덮어씀)
-GLARE_LEVEL = 250
-GLARE_FULL = 0.15          # 포화 비율이 이 이상이면 C_glare = 0
 CNR_LOW, CNR_HIGH = 2.0, 6.0
-C_MIN = 0.5
-DEFAULT_THRESHOLDS = {"printed": 0.35, "handwritten": 0.55}
+MASK_FULL = 0.3            # 글자 주변 녹 비율이 이 이상이면 C_mask = 0
+DEFAULT_THRESHOLDS = {"printed": 0.45, "handwritten": 0.70}
+SPECULAR_V = 245           # 포화(반사광) 픽셀: HSV V(회색이면 밝기) > 이 값
+SPECULAR_REJECT = 0.15     # 글자 영역에서 포화 픽셀이 이 비율을 넘으면 점수 계산 없이 기각
+WORK_LONG_SIDE = 1280      # 분석 해상도 (긴 변). 큰 사진은 줄여서 계산 (지표들은 크기 불변으로 설계됨)
 
 
 def load_calibration(path=WEIGHTS_PATH):
@@ -60,39 +75,105 @@ def _num(v):
     return None if v is None or (isinstance(v, float) and not math.isfinite(v)) else float(v)
 
 
-def extract_features(image_path_or_array):
-    """φ₁~φ₈ (계산 불가면 None) 과 각 모듈의 원 결과."""
+LINE_FEATURES = {"phi_2": calculate_phi_2_spacing, "phi_4": calculate_phi_4_baseline,
+                 "phi_6": calculate_phi_6_size_variance}
+LINE_MIN_CHARS = 3         # 줄 지표(간격·기준선·크기)에 필요한 최소 글자 수. 2글자면 기준선 오차가 항상 0,
+                           # 간격이 하나뿐이라 '아주 규칙적 = 인쇄체' 로 거짓 판단됨 -> 계산 불가(None) 처리
+
+
+def extract_features(image_path_or_array, use_layout=True):
+    """φ₁~φ₈ (계산 불가면 None) 과 각 모듈의 원 결과.
+
+    use_layout: 경계 성분(종이·판 가장자리)을 지우고 줄을 나눠, 줄 지표(φ₂·φ₄·φ₆)는 줄마다 계산해
+                유효 글자 수로 가중 평균한다. 모양 지표(φ₁·φ₃·φ₅·φ₇·φ₈)는 정리된 전체 영상에서 계산.
+    """
     img = load_image(image_path_or_array)
-    r1 = stroke_thickness_variation(img)
+    if use_layout:
+        lay = analyze_layout(img)
+        clean = lay["gray"]
+    else:
+        lay, clean = None, img
+    r1 = stroke_thickness_variation(clean)
     raw = {
         "phi_1": r1,
-        "phi_2": calculate_phi_2_spacing(img),
-        "phi_3": calculate_phi_3_orientation(img),
-        "phi_4": calculate_phi_4_baseline(img),
-        "phi_5": calculate_phi_5_curvature(img),
-        "phi_6": calculate_phi_6_size_variance(img),
-        "phi_7": calculate_phi_7_roughness(img),
-        "phi_8": calculate_phi_8_connectivity(img),
+        "phi_3": calculate_phi_3_orientation(clean),
+        "phi_5": calculate_phi_5_curvature(clean),
+        "phi_7": calculate_phi_7_roughness(clean),
+        "phi_8": calculate_phi_8_connectivity(clean),
     }
     phis = {"phi_1": _num(r1.phi1) if r1.valid else None}
-    for k in FEATURES[1:]:
+    for k in ("phi_3", "phi_5", "phi_7", "phi_8"):
         phis[k] = _num(raw[k][k])
+
+    # 줄 지표
+    line_images = [ln["image"] for ln in lay["lines"]] if lay and lay["lines"] else [clean]
+    for k, fn in LINE_FEATURES.items():
+        vals, ws, per_line = [], [], []
+        for li in line_images:
+            r = fn(li)
+            n = r.get("num_valid_chars", 0)
+            v = _num(r[k])
+            per_line.append(r)
+            if v is not None and n >= LINE_MIN_CHARS:
+                vals.append(v)
+                ws.append(n)
+        phis[k] = float(np.average(vals, weights=ws)) if vals else None
+        raw[k] = {"per_line": per_line, k: phis[k], "lines_used": len(vals),
+                  "reason": "" if vals else f"글자 {LINE_MIN_CHARS}개 이상인 줄 없음"}
+    raw["layout"] = lay
+    phis = {k: phis[k] for k in FEATURES}
     return phis, raw
 
 
-def image_confidence(img):
-    """반사광 포화 비율과 배경-획 CNR 로 영상 품질 신뢰도. (C_glare, C_contrast, 상세) 반환."""
+def image_confidence(img, pre=None):
+    """참고 신뢰도 (판정에는 쓰지 않음, 이후 신뢰도 평가 단계용). (C_contrast, C_mask, 상세) 반환.
+    img 는 0단계를 거친 회색 영상, pre 는 preprocess_color 결과."""
     gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
-    glare = float((gray >= GLARE_LEVEL).mean())
-    c_glare = float(np.clip(1 - glare / GLARE_FULL, 0, 1))
     ink = _remove_specks(binarize(img))
+    detail = {"cnr": 0.0, "rust_near_text": 0.0}
     if ink.sum() < 20 or (~ink).sum() < 20:
-        return c_glare, 0.0, {"glare_ratio": glare, "cnr": 0.0}
+        return 0.0, 1.0, detail
     background = ~cv2.dilate(ink.astype(np.uint8), np.ones((5, 5), np.uint8)).astype(bool)  # 획 테두리 제외
     bg = gray[background] if background.any() else gray[~ink]
     cnr = abs(float(np.median(bg)) - float(np.median(gray[ink]))) / (float(bg.std()) + 1e-6)
     c_contrast = float(np.clip((cnr - CNR_LOW) / (CNR_HIGH - CNR_LOW), 0, 1))
-    return c_glare, c_contrast, {"glare_ratio": glare, "cnr": cnr}
+    rust = text_region_penalty(pre, ink) if pre is not None and pre["is_color"] else 0.0
+    c_mask = float(np.clip(1 - rust / MASK_FULL, 0, 1))
+    detail.update(cnr=cnr, rust_near_text=rust)
+    return c_contrast, c_mask, detail
+
+
+def text_region(work, pad_ratio=0.05):
+    """글자 영역 상자 (x0, y0, x1, y1): 잉크 성분 중 영상 경계에 닿지 않는 것들의 외접 상자 + 여유."""
+    ink = _remove_specks(binarize(work))
+    n, lab, st, _ = cv2.connectedComponentsWithStats(ink.astype(np.uint8), connectivity=8)
+    h, w = ink.shape
+    keep = [i for i in range(1, n) if st[i, 0] > 0 and st[i, 1] > 0 and st[i, 0] + st[i, 2] < w and st[i, 1] + st[i, 3] < h]
+    if not keep:
+        keep = list(range(1, n))
+    if not keep:
+        return 0, 0, w, h
+    x0 = min(st[i, 0] for i in keep)
+    y0 = min(st[i, 1] for i in keep)
+    x1 = max(st[i, 0] + st[i, 2] for i in keep)
+    y1 = max(st[i, 1] + st[i, 3] for i in keep)
+    px, py = int(pad_ratio * (x1 - x0)) + 2, int(pad_ratio * (y1 - y0)) + 2
+    return max(0, x0 - px), max(0, y0 - py), min(w, x1 + px), min(h, y1 + py)
+
+
+def specular_ratio(img, box):
+    """글자 영역 안에서 포화(반사광) 픽셀 비율. 컬러면 HSV V, 회색이면 밝기."""
+    x0, y0, x1, y1 = box
+    v = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)[..., 2] if img.ndim == 3 else img
+    region = v[y0:y1, x0:x1]
+    return float((region > SPECULAR_V).mean()) if region.size else 0.0
+
+
+def to_work_resolution(img):
+    scale = WORK_LONG_SIDE / max(img.shape[:2])
+    if scale >= 1:
+        return img, 1.0
+    return cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA), scale
 
 
 def combine(phis, weights):
@@ -106,45 +187,81 @@ def combine(phis, weights):
     return float(sum(used[k] * phis[k] for k in used)), used, float(s / total) if total > 0 else 0.0
 
 
-def evaluate_handwritten_score(image_path_or_array, weights=None, thresholds=None) -> dict:
-    """수기 점수 S_hand, 신뢰도 C, 판정.
+def evaluate_handwritten_score(image_path_or_array, weights=None, thresholds=None, color="off",
+                               early_exit=True) -> dict:
+    """2단계 계층형 판정.
 
     weights     {"phi_1": w1, ...}. None 이면 objective_weights.json (없으면 균등)
     thresholds  {"printed": t_p, "handwritten": t_h}. None 이면 json 의 값
+    color       0단계: "off"(기본, 회색 영상 그대로) | "auto" | "dark" | "white" | "yellow" (색상 전처리)
+                반사광을 다루지 않는 조건의 합성 실험에서 회색 이진화가 색상 전처리보다 같거나 나았다
+                (잉크 마스크 IoU: 검정 0.96 vs 0.94, 노랑 0.98 vs 0.92, 흰색 0.93 vs 0.94). 실제 녹 색이
+                합성과 다를 수 있으니 현장 사진에서 다시 비교할 것.
+    early_exit  1단계 기계 패턴 조기 확정 사용 여부
 
-    반환 dict: score(S_hand), confidence(C), verdict, features(φ 값, None 포함), weights_used(재분배 후),
-              coverage, confidence_parts, raw(각 모듈 결과)
+    반환 dict: stage(0 = 반사광 기각, 1 = 조기 확정, 2 = φ 점수), flags, specular_ratio, text_box,
+              score(S_hand, 조기 확정이면 0, 기각이면 None), verdict(점수로만),
+              confidence(참고 신뢰도, 판정에 쓰지 않음),
+              mechanical(1단계 결과), features(φ, 1단계 확정이면 모두 None), weights_used, coverage,
+              confidence_parts, preprocess(0단계 요약), raw
     """
-    img = load_image(image_path_or_array)
+    img, work_scale = to_work_resolution(load_image(image_path_or_array))
     cal_w, cal_t = load_calibration()
     weights = dict(weights or cal_w)
     thresholds = dict(thresholds or cal_t)
-    phis, raw = extract_features(img)
-    score, used, coverage = combine(phis, weights)
-    c_glare, c_contrast, detail = image_confidence(img)
-    confidence = c_glare * c_contrast * coverage
 
+    # 0단계: 색상 전처리
+    pre = preprocess_color(img, marking=color) if color != "off" else preprocess_color(
+        cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img)
+    work = pre["enhanced"]
+    c_contrast, c_mask, detail = image_confidence(work, pre)
+    summary = {"is_color": pre["is_color"], "marking": pre["marking"]}
+    box = text_region(work)
+    spec = specular_ratio(img, box)
+    flags = []
+    if detail.get("cnr", 0.0) < CNR_LOW:
+        flags.append("LOW_CONTRAST")                    # 경고만 (판정은 계속)
+    base = {"thresholds": thresholds, "preprocess": summary, "work_image": work, "work_scale": work_scale,
+            "text_box": box, "specular_ratio": spec, "flags": flags}
+
+    # 안전장치: 글자 영역이 반사광으로 포화되면 점수를 계산하지 않고 기각
+    if spec > SPECULAR_REJECT:
+        flags.insert(0, "REJECTED_SPECULAR_NOISE")
+        return {**base, "stage": 0, "score": None, "verdict": "Uncertain (Need Review)",
+                "confidence": 0.0, "mechanical": None, "features": {k: None for k in FEATURES},
+                "weights_used": {}, "coverage": 0.0,
+                "confidence_parts": {"contrast": c_contrast, "mask": c_mask, "coverage": 0.0, **detail}, "raw": {}}
+
+    # 1단계: 기계 패턴 -> 인쇄체 조기 확정
+    mech = detect_mechanical_pattern(work)
+    if early_exit and mech["is_mechanical"]:
+        return {**base, "stage": 1, "score": 0.0, "verdict": "Confirmed Printed",
+                "confidence": float(c_contrast * c_mask), "mechanical": mech,
+                "features": {k: None for k in FEATURES}, "weights_used": {}, "coverage": 0.0,
+                "confidence_parts": {"contrast": c_contrast, "mask": c_mask, "coverage": 1.0, **detail}, "raw": {}}
+
+    # 2단계: φ 점수 -> 판정 (신뢰도와 무관하게 점수 임계값으로)
+    phis, raw = extract_features(work)
+    score, used, coverage = combine(phis, weights)
     if score is None:
-        verdict = "Low Confidence (Need Review)"
-    elif confidence < C_MIN:
-        verdict = "Low Confidence (Need Review)"
+        verdict = "Uncertain (Need Review)"
     elif score >= thresholds["handwritten"]:
         verdict = "Confirmed Handwritten"
     elif score <= thresholds["printed"]:
         verdict = "Confirmed Printed"
     else:
-        verdict = "Low Confidence (Need Review)"
-    return {"score": score, "confidence": float(confidence), "verdict": verdict, "features": phis,
-            "weights_used": used, "coverage": coverage, "thresholds": thresholds,
-            "confidence_parts": {"glare": c_glare, "contrast": c_contrast, "coverage": coverage, **detail},
-            "raw": raw}
+        verdict = "Uncertain (Need Review)"          # 완충 구간: 점수만으로는 확정하지 않음
+    return {**base, "stage": 2, "score": score, "verdict": verdict,
+            "confidence": float(c_contrast * c_mask * coverage), "mechanical": mech, "features": phis,
+            "weights_used": used, "coverage": coverage,
+            "confidence_parts": {"contrast": c_contrast, "mask": c_mask, "coverage": coverage, **detail}, "raw": raw}
 
 
 # ---------------------------------------------------------------------------
 # 시각화: 원본 + 레이더 차트 + 지표별 막대
 # ---------------------------------------------------------------------------
 VERDICT_COLORS = {"Confirmed Handwritten": (40, 40, 220), "Confirmed Printed": (40, 160, 40),
-                  "Low Confidence (Need Review)": (0, 150, 230)}
+                  "Uncertain (Need Review)": (0, 150, 230)}
 
 
 def _radar(phis, used, size=400):
@@ -217,12 +334,17 @@ def draw_objective_debug(image_path_or_array, result):
     left = np.full((panel_h, max(560, src.shape[1]), 3), 255, np.uint8)
     left[80:80 + src.shape[0], :src.shape[1]] = src
     color = VERDICT_COLORS[result["verdict"]]
-    cv2.rectangle(left, (0, 0), (left.shape[1], 70), color, -1)
+    cv2.rectangle(left, (0, 0), (left.shape[1], 76), color, -1)
     s = "n/a" if result["score"] is None else f"{result['score']:.3f}"
     cv2.putText(left, result["verdict"], (12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 255, 255), 2, cv2.LINE_AA)
     cp = result["confidence_parts"]
-    cv2.putText(left, f"S_hand={s}  C={result['confidence']:.2f}  (glare {cp['glare']:.2f} x contrast {cp['contrast']:.2f}"
-                      f" x coverage {cp['coverage']:.2f})", (12, 56), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1,
+    stage = {0: f"REJECTED_SPECULAR_NOISE (saturated {result['specular_ratio']:.0%} of text area)",
+             1: f"stage 1: {result['mechanical']['kind'] if result['mechanical'] else ''} pattern -> early exit",
+             2: "stage 2: phi score"}[result["stage"]]
+    cv2.putText(left, f"{stage}   S_hand={s}  C={result['confidence']:.2f}", (12, 52), cv2.FONT_HERSHEY_SIMPLEX, 0.45,
+                (255, 255, 255), 1, cv2.LINE_AA)
+    cv2.putText(left, f"ref. confidence (not used for verdict): contrast {cp['contrast']:.2f} x rust mask {cp['mask']:.2f}"
+                      f" x coverage {cp['coverage']:.2f}", (12, 68), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 255), 1,
                 cv2.LINE_AA)
     right = np.vstack([_radar(result["features"], result["weights_used"]),
                        _bars(result["features"], result["weights_used"])])

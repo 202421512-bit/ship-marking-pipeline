@@ -35,7 +35,10 @@ MAX_ELONGATION = 12.0    # 주축/부축 비가 이보다 크면 긁힘/선 노�
 PUNCT_HEIGHT_RATIO = 0.5 # 높이가 중앙값의 절반 미만이면 문장부호 -> 각도 통계 제외
 MIN_ECCENTRICITY = 0.5   # 편심률 e = sqrt(1 − λ₂/λ₁) 이 이보다 작으면 주축 불안정 -> 제외
 FRAGMENT_MIN_COUNT = 8   # 조각이 이만큼 이상이고
-FRAGMENT_SIZE_RATIO = 0.2  # 조각 크기 중앙값이 크롭 높이의 이 비율보다 작으면 '끊긴 글자' 로 보고 병합
+FRAGMENT_SIZE_RATIO = 0.2  # 조각 크기 중앙값이 크롭 높이의 이 비율보다 작고
+FRAGMENT_FILL_MIN = 0.6    # 상자 채움 중앙값이 이 이상(도트처럼 꽉 찬 모양, 원 ≈ 0.78)이고
+FRAGMENT_AREA_CV = 0.35    # 조각 면적이 고르고 (변동계수 < 이 값)
+FRAGMENT_SOLIDITY_MIN = 0.9  # 볼록도 중앙값이 이 이상(도트 ≈ 1)이면 '끊긴 글자' 로 보고 병합
 
 
 # ---------------------------------------------------------------------------
@@ -150,8 +153,22 @@ def _cut_thin_lines(mask):
 def _merge_fragments(mask):
     """도트/스텐실처럼 글자가 잘게 끊겼으면 이웃 조각 간격만큼 닫아 글자 단위로 붙인다."""
     _, _, stats, centroids = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
-    sizes = np.maximum(stats[1:, cv2.CC_STAT_WIDTH], stats[1:, cv2.CC_STAT_HEIGHT])
+    w, h, area = (stats[1:, i].astype(float) for i in (cv2.CC_STAT_WIDTH, cv2.CC_STAT_HEIGHT, cv2.CC_STAT_AREA))
+    sizes = np.maximum(w, h)
     if len(sizes) < FRAGMENT_MIN_COUNT or np.median(sizes) >= FRAGMENT_SIZE_RATIO * mask.shape[0]:
+        return mask, 0
+    # 조각은 도트처럼 '작고 둥글고 꽉 찬' 모양이어야 한다. 크기 기준만 쓰면 여러 줄이 찍힌 사진에서
+    # 진짜 글자(길쭉하거나 속이 빈 모양, 상자 채움 0.2~0.4)도 '작은 조각' 이 되어 글자끼리 덩어리로 붙는다.
+    fill = area / np.maximum(w * h, 1)
+    aspect = w / np.maximum(h, 1)
+    if (np.median(fill) < FRAGMENT_FILL_MIN or not (0.6 <= np.median(aspect) <= 1.7)
+            or area.std() / max(area.mean(), 1) > FRAGMENT_AREA_CV):
+        return mask, 0
+    # 볼록도(면적 / 볼록 껍질 면적): 도트는 ≈1, 굵은 글자도 구멍·오목한 곳이 있어 0.85 아래
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    solidity = [cv2.contourArea(c) / max(cv2.contourArea(cv2.convexHull(c)), 1e-6) for c in contours
+                if cv2.contourArea(c) > 0]
+    if not solidity or np.median(solidity) < FRAGMENT_SOLIDITY_MIN:
         return mask, 0
     tree = cKDTree(centroids[1:])
     nn, _ = tree.query(centroids[1:], k=2)                     # 자기 자신 다음으로 가까운 조각

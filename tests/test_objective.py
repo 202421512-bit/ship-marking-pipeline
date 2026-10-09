@@ -65,19 +65,26 @@ def test_dynamic_reweighting_sums_to_one():
     assert of.combine({k: None for k in of.FEATURES}, w)[0] is None
 
 
-def test_confidence_drops_with_glare_and_low_contrast():
+def test_reference_confidence_drops_with_low_contrast():
     rng = np.random.default_rng(3)
     img = sd.printed_sans("B12SP34", rng)
-    g_ok, c_ok, _ = of.image_confidence(img)
-    glared = img.copy()
-    glared[:, : img.shape[1] // 2] = 255                       # 절반 포화
-    g_bad, _, d = of.image_confidence(glared)
+    c_ok, m_ok, _ = of.image_confidence(img)
     faint = (200 - (200 - img.astype(np.float32)) * 0.1).astype(np.uint8)
     faint = np.clip(faint + rng.normal(0, 8, faint.shape), 0, 255).astype(np.uint8)
-    _, c_bad, _ = of.image_confidence(faint)
-    assert g_ok == pytest.approx(1.0) and c_ok > 0.9
-    assert g_bad == 0.0 and d["glare_ratio"] > 0.3
+    c_bad, _, _ = of.image_confidence(faint)
+    assert c_ok > 0.9 and m_ok == 1.0
     assert c_bad < c_ok
+
+
+def test_verdict_does_not_depend_on_confidence():
+    """판정은 점수로만: 같은 점수면 신뢰도가 낮아도 같은 판정 (신뢰도 평가는 이후 단계)."""
+    rng = np.random.default_rng(8)
+    img = sd.field_noise(sd.handwritten("HK357B12", rng), rng)
+    r = of.evaluate_handwritten_score(img)
+    th = r["thresholds"]
+    expected = ("Confirmed Handwritten" if r["score"] >= th["handwritten"] else
+                "Confirmed Printed" if r["score"] <= th["printed"] else "Uncertain (Need Review)")
+    assert r["verdict"] == expected
 
 
 def test_evaluate_returns_verdict_and_handles_single_char(tmp_path):

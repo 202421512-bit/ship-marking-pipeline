@@ -1,7 +1,9 @@
 """
 통합 벤치마크 + 데이터 기반 가중치 산출.
 
-  1. 합성 데이터셋 (인쇄체 n, 수기 n) 생성 -> 8개 특징 일괄 추출 (features.csv 로 캐시)
+  1. 합성 데이터셋 (인쇄체 n, 수기 n) 생성 -> 1단계 기계 패턴 검출 + 8개 특징 일괄 추출 (features.csv 로 캐시)
+     1단계 검출률(인쇄체 종류별)과 수기 오검출을 리포트하고, 가중치는 2단계로 넘어오는 표본으로만 학습한다
+     (조기 확정되는 도트·스텐실은 φ 를 거꾸로 움직이므로 섞이면 가중치가 왜곡됨)
   2. 지표별 분포 통계(평균·표준편차·중앙값·결측률), ROC-AUC, Cohen's d, 인쇄체 종류별 AUC
   3. 지표 간 상관 행렬 (Pearson, Spearman) + 히트맵
   4. 학습/평가 분할 (층화 70/30). 학습 세트에서 L2 로지스틱 회귀(표준화 특징, λ 는 5-겹 교차검증)
@@ -26,6 +28,7 @@ from datetime import date
 import cv2
 import numpy as np
 
+from mechanical_pattern_detector import detect_mechanical_pattern
 from objective_function import FEATURE_NAMES, FEATURES, WEIGHTS_PATH, combine, extract_features
 from synthetic_dataset import make_dataset
 
@@ -166,6 +169,47 @@ def score_matrix(X, weights):
     return np.array(out)
 
 
+MIN_GAP = 0.25            # 인쇄체 확정 임계값과 수기 확정 임계값 사이 최소 완충 간격
+MAX_ERROR = 0.03          # 확정 구간 안 오판율 상한
+
+
+def out_of_fold_scores(X, y, lam, k=5, seed=0):
+    """학습 세트 안 k-겹: 각 겹을 뺀 나머지로 가중치를 구해 그 겹의 점수를 낸다 (임계값을 낙관적으로 잡지 않게)."""
+    folds = stratified_folds(y, k, np.random.default_rng(seed))
+    oof = np.full(len(y), np.nan)
+    for f in folds:
+        tr = np.setdiff1d(np.arange(len(y)), f)
+        pp = Preprocessor().fit(X[tr])
+        coef, _ = fit_logistic(pp.transform(X[tr]), y[tr], lam)
+        oof[f] = score_matrix(X[f], weights_from_coefficients(coef, pp.std, "positive"))
+    return oof
+
+
+def choose_thresholds_global(s, y, max_error=MAX_ERROR, min_gap=MIN_GAP, steps=101):
+    """확정 비율을 최대로 하되 (확정된 것 중 오판 수 / 확정 수) ≤ max_error, 두 임계값 간격 ≥ min_gap.
+    양쪽 끝에서부터 누적 오판율을 따로 지키는 방식(choose_thresholds)은 이상치 하나에 확정 구간 전체가 줄어
+    합성 실험에서 확정 비율이 9% 까지 떨어졌다. 같은 확정 비율이면 간격이 넓은 쪽, 그다음 가운데에 가까운 쪽."""
+    ok = np.isfinite(s)
+    s, y = s[ok], y[ok]
+    grid = np.linspace(0, 1, steps)
+    best, best_key = None, None
+    for t_p in grid:
+        for t_h in grid[grid >= t_p + min_gap - 1e-9]:
+            prin, hand = s <= t_p, s >= t_h
+            decided = prin.sum() + hand.sum()
+            if decided == 0:
+                continue
+            errors = (prin & (y == 1)).sum() + (hand & (y == 0)).sum()
+            if errors / decided > max_error:
+                continue
+            key = (decided, t_h - t_p, -abs((t_p + t_h) / 2 - 0.5))
+            if best_key is None or key > best_key:
+                best, best_key = (float(t_p), float(t_h)), key
+    if best is None:
+        return {"printed": 0.5 - min_gap / 2, "handwritten": 0.5 + min_gap / 2}
+    return {"printed": best[0], "handwritten": best[1]}
+
+
 def choose_thresholds(s, y, max_error=0.03):
     """확정 구간 오판율 ≤ max_error 가 되는 가장 넓은 확정 구간.
     인쇄체 확정: s ≤ t_p 중 수기 비율 ≤ max_error 인 가장 큰 t_p / 수기 확정: s ≥ t_h 중 인쇄체 비율 ≤ ...."""
@@ -203,19 +247,28 @@ def decision_metrics(s, y, th):
 # 데이터 / 캐시
 # ---------------------------------------------------------------------------
 def extract_all(n_per_class, seed, cache):
+    """(X, y, kinds, mech) - mech: 1단계 기계 패턴 결과 ("dot_matrix" | "stencil" | "none").
+    캐시에 mech 열이 없으면 (예전 캐시) 같은 시드로 영상만 다시 만들어 검출해 채운다."""
+    rows = None
     if cache and os.path.exists(cache):
         with open(cache, encoding="utf-8") as f:
             rows = list(csv.DictReader(f))
         print(f"특징 캐시 사용: {cache} ({len(rows)}개)")
-    else:
+    if rows is None or "mech" not in rows[0]:
         data = make_dataset(n_per_class, seed)
-        rows, t0 = [], time.perf_counter()
+        new_rows, t0 = [], time.perf_counter()
         for i, (img, meta) in enumerate(data):
+            mech = detect_mechanical_pattern(img)["kind"] or "none"
+            if rows is not None:                          # 특징은 캐시 재사용, 1단계만 추가
+                new_rows.append({**rows[i], "mech": mech})
+                continue
             phis, _ = extract_features(img)
-            rows.append({"label": meta["label"], "kind": meta["kind"] + ("_rot" if "angle" in meta else ""),
-                         "text": meta["text"], **{k: ("" if v is None else v) for k, v in phis.items()}})
+            new_rows.append({"label": meta["label"], "kind": meta["kind"] + ("_rot" if "angle" in meta else ""),
+                             "text": meta["text"], "mech": mech,
+                             **{k: ("" if v is None else v) for k, v in phis.items()}})
             if (i + 1) % 25 == 0:
                 print(f"  {i + 1}/{len(data)} 추출 ({(time.perf_counter() - t0) / (i + 1) * 1000:.0f} ms/장)")
+        rows = new_rows
         if cache:
             os.makedirs(os.path.dirname(cache) or ".", exist_ok=True)
             with open(cache, "w", encoding="utf-8", newline="") as f:
@@ -225,7 +278,8 @@ def extract_all(n_per_class, seed, cache):
     X = np.array([[float(r[k]) if r[k] not in ("", None) else np.nan for k in FEATURES] for r in rows])
     y = np.array([int(r["label"]) for r in rows])
     kinds = np.array([r["kind"] for r in rows])
-    return X, y, kinds
+    mech = np.array([r["mech"] for r in rows])
+    return X, y, kinds, mech
 
 
 # ---------------------------------------------------------------------------
@@ -299,9 +353,23 @@ def main():
     parser.add_argument("--no-save", action="store_true", help="objective_weights.json 을 쓰지 않음")
     args = parser.parse_args()
     os.makedirs(OUT_DIR, exist_ok=True)
-    X, y, kinds = extract_all(args.n, args.seed, None if args.no_cache else args.features)
+    X, y, kinds, mech = extract_all(args.n, args.seed, None if args.no_cache else args.features)
     lines = [f"# 벤치마크 리포트 ({date.today()})", "",
              f"표본: 인쇄체 {int((y == 0).sum())}, 수기 {int((y == 1).sum())} (합성, seed={args.seed})", ""]
+
+    # 0) 1단계 기계 패턴 사전 판별
+    early = mech != "none"
+    lines += ["## 0. 1단계 기계 패턴 사전 판별 (조기 인쇄체 확정)", "",
+              "| 표본 종류 | 수 | 도트 검출 | 스텐실 검출 | 조기 확정 비율 |", "|---|---|---|---|---|"]
+    print("\n1단계 기계 패턴 검출")
+    for kd in sorted(set(kinds)):
+        sel = kinds == kd
+        n_dot, n_st = int((mech[sel] == "dot_matrix").sum()), int((mech[sel] == "stencil").sum())
+        print(f"  {kd:14s} n={sel.sum():3d}  dot={n_dot:3d}  stencil={n_st:3d}  조기 확정 {early[sel].mean():.0%}")
+        lines.append(f"| {kd} | {sel.sum()} | {n_dot} | {n_st} | {early[sel].mean():.0%} |")
+    fp = int((early & (y == 1)).sum())
+    lines += ["", f"수기 오검출(수기를 기계 패턴으로 조기 확정): {fp} / {int((y == 1).sum())}", ""]
+    print(f"  수기 오검출 {fp}/{int((y == 1).sum())}")
 
     # 1) 분포 통계 · AUC · Cohen's d
     lines += ["## 1. 지표별 분포와 분리도 (전체 표본)", "",
@@ -347,6 +415,9 @@ def main():
     rng = np.random.default_rng(args.seed + 1)
     test_idx = np.concatenate([rng.permutation(np.flatnonzero(y == c))[: int(round(0.3 * (y == c).sum()))] for c in (0, 1)])
     train_idx = np.setdiff1d(np.arange(len(y)), test_idx)
+    train_all, test_all = train_idx, test_idx
+    train_idx = train_idx[~early[train_idx]]              # 2단계로 넘어오는 표본만 학습
+    test_idx = test_idx[~early[test_idx]]
     Xtr, ytr, Xte, yte = X[train_idx], y[train_idx], X[test_idx], y[test_idx]
     lam, cv_scores = choose_lambda(Xtr, ytr, seed=args.seed)
     pp = Preprocessor().fit(Xtr)
@@ -355,11 +426,12 @@ def main():
     w_abs = weights_from_coefficients(coef, pp.std, "abs")
     w_eq = np.full(len(FEATURES), 1 / len(FEATURES))
 
-    s_tr = score_matrix(Xtr, w_pos)
-    th = choose_thresholds(s_tr, ytr)
+    s_oof = out_of_fold_scores(Xtr, ytr, lam, seed=args.seed)
+    th = choose_thresholds_global(s_oof, ytr)
     print(f"\nλ = {lam} (5-겹 CV AUC {cv_scores})")
     print(f"{'지표':14s} {'표준화 계수':>10s} {'w (권장)':>9s} {'|c| 정규화':>10s}")
-    lines += ["", "## 3. 가중치 (학습 세트 70%, L2 로지스틱 회귀)", "",
+    lines += ["", "## 3. 가중치 (학습 세트 70% 중 2단계로 넘어오는 표본, L2 로지스틱 회귀)", "",
+              f"학습 표본: {len(train_idx)} (조기 확정 {len(train_all) - len(train_idx)}개 제외)", "",
               f"λ = {lam} (5-겹 교차검증 AUC: " + ", ".join(f"{k}: {v:.3f}" for k, v in cv_scores.items()) + ")", "",
               "| 지표 | 표준화 계수 c | w* (권장: max(c/σ,0) 정규화) | |c| 정규화 (요청 방식, 비교용) |",
               "|---|---|---|---|"]
@@ -382,21 +454,43 @@ def main():
     i_best = FEATURES.index(best_single)
     v = Xte[:, i_best]
     res[f"단일 최고 지표 {best_single}"] = roc_auc(v[(yte == 0) & np.isfinite(v)], v[(yte == 1) & np.isfinite(v)])
-    dm_tr = decision_metrics(s_tr, ytr, th)
+    dm_tr = decision_metrics(s_oof, ytr, th)
     dm_te = decision_metrics(score_matrix(Xte, w_pos), yte, th)
     print("\n평가 세트 AUC: " + "  ".join(f"{k} {v:.3f}" for k, v in res.items()))
-    print(f"임계값 (학습 세트, 확정 오판 ≤3%): 인쇄체 ≤ {th['printed']:.3f}, 수기 ≥ {th['handwritten']:.3f}")
+    print(f"임계값 (학습 세트 교차검증 점수, 확정 오판 ≤{MAX_ERROR:.0%}, 완충 간격 ≥{MIN_GAP}): "
+          f"인쇄체 ≤ {th['printed']:.3f}, 수기 ≥ {th['handwritten']:.3f}")
     print(f"평가 세트: 확정 {dm_te['decided_rate']:.0%}, 확정 정확도 {dm_te['accuracy_on_decided']:.1%}, "
           f"검토 필요 {dm_te['review_rate']:.0%}")
-    lines += ["", "## 4. 평가 세트 30% 성능", "", "| 점수 | AUC |", "|---|---|"]
+    lines += ["", "## 4. 평가 세트 30% 성능 (2단계 표본)", "", "| 점수 | AUC |", "|---|---|"]
     lines += [f"| {k} | {v:.3f} |" for k, v in res.items()]
-    lines += ["", f"판정 임계값 (학습 세트에서 확정 구간 오판율 ≤ 3%): 인쇄체 확정 S ≤ {th['printed']:.3f}, "
+    lines += ["", f"판정 임계값: 학습 세트 5-겹 교차검증 점수에서 '확정 비율 최대, 확정 오판율 ≤ {MAX_ERROR:.0%}, "
+                  f"완충 간격 ≥ {MIN_GAP}' -> 인쇄체 확정 S ≤ {th['printed']:.3f}, "
                   f"수기 확정 S ≥ {th['handwritten']:.3f}", "",
               "| 세트 | 확정 비율 | 확정 정확도 | 검토 필요 |", "|---|---|---|---|",
-              f"| 학습 | {dm_tr['decided_rate']:.0%} | {dm_tr['accuracy_on_decided']:.1%} | {dm_tr['review_rate']:.0%} |",
+              f"| 학습 (교차검증 점수) | {dm_tr['decided_rate']:.0%} | {dm_tr['accuracy_on_decided']:.1%} | {dm_tr['review_rate']:.0%} |",
               f"| 평가 | {dm_te['decided_rate']:.0%} | {dm_te['accuracy_on_decided']:.1%} | {dm_te['review_rate']:.0%} |",
               "", "주의: 합성 데이터는 특징을 설계할 때 쓴 생성기 계열이라 실제보다 낙관적이다. "
                   "현장 라벨 사진으로 특징 CSV 를 만들어 다시 돌려야 한다."]
+
+    # 5) 전체 파이프라인: 조기 확정은 인쇄체 판정, 나머지는 S 임계값
+    s_all = np.where(early[test_all], 0.0, score_matrix(X[test_all], w_pos))
+    s_all = np.where(np.isfinite(s_all), s_all, np.nan)
+    y_all = y[test_all]
+    dm_all = decision_metrics(s_all, y_all, th)
+    auc_all = roc_auc(s_all[(y_all == 0) & np.isfinite(s_all)], s_all[(y_all == 1) & np.isfinite(s_all)])
+    # 비교: 1단계 없이 (모든 표본을 2단계로, 같은 가중치)
+    s_no1 = score_matrix(X[test_all], w_pos)
+    auc_no1 = roc_auc(s_no1[(y_all == 0) & np.isfinite(s_no1)], s_no1[(y_all == 1) & np.isfinite(s_no1)])
+    dm_no1 = decision_metrics(s_no1, y_all, th)
+    print(f"전체 파이프라인 (평가 세트 {len(test_all)}장): AUC {auc_all:.3f} (1단계 없이 {auc_no1:.3f}), "
+          f"확정 {dm_all['decided_rate']:.0%} (1단계 없이 {dm_no1['decided_rate']:.0%}), "
+          f"확정 정확도 {dm_all['accuracy_on_decided']:.1%}")
+    lines += ["", "## 5. 전체 파이프라인 (1단계 조기 확정 + 2단계), 평가 세트 전체", "",
+              "| 구성 | AUC | 확정 비율 | 확정 정확도 | 검토 필요 |", "|---|---|---|---|---|",
+              f"| 1단계 + 2단계 | {auc_all:.3f} | {dm_all['decided_rate']:.0%} | {dm_all['accuracy_on_decided']:.1%} | "
+              f"{dm_all['review_rate']:.0%} |",
+              f"| 2단계만 (비교) | {auc_no1:.3f} | {dm_no1['decided_rate']:.0%} | {dm_no1['accuracy_on_decided']:.1%} | "
+              f"{dm_no1['review_rate']:.0%} |"]
 
     with open(os.path.join(OUT_DIR, "report.md"), "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
@@ -404,7 +498,8 @@ def main():
     if not args.no_save:
         payload = {"weights": dict(zip(FEATURES, map(float, w_pos))), "thresholds": th,
                    "meta": {"date": str(date.today()), "source": "synthetic", "n_per_class": args.n, "seed": args.seed,
-                            "lambda": lam, "test_auc": res["w* (권장)"],
+                            "lambda": lam, "test_auc_stage2": res["w* (권장)"], "test_auc_pipeline": auc_all,
+                            "trained_on": "2단계 표본 (기계 패턴 조기 확정 제외)",
                             "note": "합성 데이터 기준. 현장 데이터로 재산출 필요"}}
         with open(WEIGHTS_PATH, "w", encoding="utf-8") as f:
             json.dump(payload, f, ensure_ascii=False, indent=2)
