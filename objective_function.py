@@ -13,6 +13,10 @@
       (없으면 균등 가중치).
     - 동적 재분배: 글자가 1개뿐이라 φ₂(간격)·φ₄(기준선)·φ₆(크기)·φ₃(기울기) 가 None 이면 그 항을 빼고
       남은 지표의 가중치 합이 1 이 되게 비례 재할당한다.
+  유착 가산점: 글자끼리 닿은 덩어리(touching_detector, has_touching_chars)는 폰트 메트릭스로 자간을 제어하는
+  기계식에서는 나올 수 없으므로 수기의 강한 증거다. 1단계에서 기계 패턴이 확정되지 않았을 때만
+  S ← S + b·(1 − S) 로 점수를 끌어올린다 (b: 접점 1개 TOUCH_BOOST, 2개 이상 TOUCH_BOOST_MULTI, 가는 연결선뿐이면 TOUCH_BOOST_BRIDGED).
+  φ₆ 는 유착 덩어리를 분할 추정하고, φ₈ 은 겹침이 만든 X·T 접점을 그대로 쓴다.
   목적: 받은 영상의 표기가 수기인지 판별한다. 판정은 점수(와 1단계 패턴)로만 내리고 신뢰도에 묶지 않는다.
   반사광은 복원·보정하지 않는다. 대신 안전장치로, 글자 영역의 포화 픽셀(V > 245) 비율이 15% 를 넘으면
   획이 뭉개져 점수가 왜곡되므로 계산하지 않고 flag "REJECTED_SPECULAR_NOISE" 와 Uncertain 을 바로 돌려준다.
@@ -42,6 +46,7 @@ from orientation_feature import _remove_specks, binarize, calculate_phi_3_orient
 from size_variance_feature import calculate_phi_6_size_variance
 from spacing_feature import calculate_phi_2_spacing
 from stroke_features import stroke_thickness_variation
+from touching_detector import detect_touching_chars
 
 FEATURES = ["phi_1", "phi_2", "phi_3", "phi_4", "phi_5", "phi_6", "phi_7", "phi_8"]
 FEATURE_NAMES = {
@@ -56,6 +61,10 @@ MASK_FULL = 0.3            # 글자 주변 녹 비율이 이 이상이면 C_mask
 DEFAULT_THRESHOLDS = {"printed": 0.45, "handwritten": 0.70}
 SPECULAR_V = 245           # 포화(반사광) 픽셀: HSV V(회색이면 밝기) > 이 값
 SPECULAR_REJECT = 0.15     # 글자 영역에서 포화 픽셀이 이 비율을 넘으면 점수 계산 없이 기각
+TOUCH_BOOST = 0.5          # 유착 접점 1개: 남은 거리(1 − S)의 이 비율만큼 S 를 올림
+TOUCH_BOOST_MULTI = 0.7    # 유착 접점 2개 이상 (글자 3개 이상이 이어짐 / 덩어리 여럿)
+TOUCH_BOOST_BRIDGED = 0.3  # 접점이 모두 가는 연결선(bridged)뿐이면 약하게: 인쇄체의 하이픈이 양옆 글자에 닿는 경우를 감안
+TOUCH_PRIOR = 0.5          # 지표를 하나도 못 구했을 때 가산점의 출발점
 WORK_LONG_SIDE = 1280      # 분석 해상도 (긴 변). 큰 사진은 줄여서 계산 (지표들은 크기 불변으로 설계됨)
 
 
@@ -121,6 +130,7 @@ def extract_features(image_path_or_array, use_layout=True):
         raw[k] = {"per_line": per_line, k: phis[k], "lines_used": len(vals),
                   "reason": "" if vals else f"글자 {LINE_MIN_CHARS}개 이상인 줄 없음"}
     raw["layout"] = lay
+    raw["touching"] = detect_touching_chars(_remove_specks(binarize(clean)))
     phis = {k: phis[k] for k in FEATURES}
     return phis, raw
 
@@ -187,6 +197,19 @@ def combine(phis, weights):
     return float(sum(used[k] * phis[k] for k in used)), used, float(s / total) if total > 0 else 0.0
 
 
+def apply_touching_boost(score, touching):
+    """유착이 검출됐으면 수기 점수에 가산점. 반환: (새 점수, 적용한 b). 유착 없으면 (score, 0.0)."""
+    if not touching or not touching["has_touching_chars"]:
+        return score, 0.0
+    comps = touching.get("components", [])
+    if comps and all(c["kind"] == "bridged" for c in comps):
+        b = TOUCH_BOOST_BRIDGED
+    else:
+        b = TOUCH_BOOST_MULTI if touching["est_joints"] >= 2 else TOUCH_BOOST
+    base = TOUCH_PRIOR if score is None else score
+    return float(base + b * (1.0 - base)), b
+
+
 def evaluate_handwritten_score(image_path_or_array, weights=None, thresholds=None, color="off",
                                early_exit=True) -> dict:
     """2단계 계층형 판정.
@@ -200,7 +223,8 @@ def evaluate_handwritten_score(image_path_or_array, weights=None, thresholds=Non
     early_exit  1단계 기계 패턴 조기 확정 사용 여부
 
     반환 dict: stage(0 = 반사광 기각, 1 = 조기 확정, 2 = φ 점수), flags, specular_ratio, text_box,
-              score(S_hand, 조기 확정이면 0, 기각이면 None), verdict(점수로만),
+              has_touching_chars / touching(유착 검출 결과) / score_before_touch / touch_boost(2단계만),
+              score(S_hand: 유착 가산점 반영 후, 조기 확정이면 0, 기각이면 None), verdict(점수로만),
               confidence(참고 신뢰도, 판정에 쓰지 않음),
               mechanical(1단계 결과), features(φ, 1단계 확정이면 모두 None), weights_used, coverage,
               confidence_parts, preprocess(0단계 요약), raw
@@ -228,7 +252,7 @@ def evaluate_handwritten_score(image_path_or_array, weights=None, thresholds=Non
     if spec > SPECULAR_REJECT:
         flags.insert(0, "REJECTED_SPECULAR_NOISE")
         return {**base, "stage": 0, "score": None, "verdict": "Uncertain (Need Review)",
-                "confidence": 0.0, "mechanical": None, "features": {k: None for k in FEATURES},
+                "confidence": 0.0, "mechanical": None, "has_touching_chars": False, "touching": None, "features": {k: None for k in FEATURES},
                 "weights_used": {}, "coverage": 0.0,
                 "confidence_parts": {"contrast": c_contrast, "mask": c_mask, "coverage": 0.0, **detail}, "raw": {}}
 
@@ -236,13 +260,18 @@ def evaluate_handwritten_score(image_path_or_array, weights=None, thresholds=Non
     mech = detect_mechanical_pattern(work)
     if early_exit and mech["is_mechanical"]:
         return {**base, "stage": 1, "score": 0.0, "verdict": "Confirmed Printed",
-                "confidence": float(c_contrast * c_mask), "mechanical": mech,
+                "confidence": float(c_contrast * c_mask), "mechanical": mech, "has_touching_chars": False, "touching": None,
                 "features": {k: None for k in FEATURES}, "weights_used": {}, "coverage": 0.0,
                 "confidence_parts": {"contrast": c_contrast, "mask": c_mask, "coverage": 1.0, **detail}, "raw": {}}
 
     # 2단계: φ 점수 -> 판정 (신뢰도와 무관하게 점수 임계값으로)
     phis, raw = extract_features(work)
     score, used, coverage = combine(phis, weights)
+    touching = raw["touching"]
+    score_raw = score
+    score, boost = apply_touching_boost(score, touching)
+    if boost:
+        flags.append("TOUCHING_CHARS")
     if score is None:
         verdict = "Uncertain (Need Review)"
     elif score >= thresholds["handwritten"]:
@@ -251,7 +280,8 @@ def evaluate_handwritten_score(image_path_or_array, weights=None, thresholds=Non
         verdict = "Confirmed Printed"
     else:
         verdict = "Uncertain (Need Review)"          # 완충 구간: 점수만으로는 확정하지 않음
-    return {**base, "stage": 2, "score": score, "verdict": verdict,
+    return {**base, "stage": 2, "score": score, "score_before_touch": score_raw, "touch_boost": boost,
+            "has_touching_chars": touching["has_touching_chars"], "touching": touching, "verdict": verdict,
             "confidence": float(c_contrast * c_mask * coverage), "mechanical": mech, "features": phis,
             "weights_used": used, "coverage": coverage,
             "confidence_parts": {"contrast": c_contrast, "mask": c_mask, "coverage": coverage, **detail}, "raw": raw}

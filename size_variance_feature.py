@@ -16,6 +16,8 @@
   4. 인쇄체도 글자 모양마다 면적·종횡비가 다르다 ('1' 은 좁고 '0', 'M' 은 넓음). 그래서 CV_A, CV_AR 은
      인쇄체에서도 0 이 아니다. 대문자·숫자는 글꼴 규격상 높이가 같으므로 높이 변동계수 cv_height 를
      함께 계산해 돌려준다 (score="height" 로 φ₆ 에 쓸 수 있음).
+  5. 유착 글자(수기에서 글자끼리 닿은 덩어리, touching_detector)는 한 덩어리가 면적 CV_A 를 비정상적으로 부풀리므로
+     추정 글자 수로 V(x) 최소 열에서 잘라 분할 추정한다 (split_touching=False 면 끔).
 """
 import math
 
@@ -24,6 +26,7 @@ import numpy as np
 
 from baseline_feature import fit_theil_sen
 from orientation_feature import _cut_thin_lines, _merge_fragments, _remove_specks, binarize, load_image
+from touching_detector import split_touching_mask
 
 ALPHA_A = 3.5             # tanh(α_A·CV_A): 0.5 ≈ CV_A 0.157 (합성 인쇄체 0.11, 수기 0.19 사이)
 ALPHA_AR = 3.0            # tanh(α_AR·CV_AR). 합성 실험에서 종횡비 분산은 구분력이 거의 없음 (AUC 0.47~0.68)
@@ -39,10 +42,12 @@ HUBER_K = 2.0             # robust="huber": 중앙값 ± k·1.4826·MAD 로 값 
 # ---------------------------------------------------------------------------
 # 글자 분리
 # ---------------------------------------------------------------------------
-def extract_characters(img, binarization="sauvola"):
+def extract_characters(img, binarization="sauvola", split_touching=False):
     """글자 단위 성분 목록과 줄 방향 (u, n). 각 글자: area, width, height(줄 좌표), 꼭짓점 4개, members."""
     mask = _remove_specks(binarize(img, binarization))
     mask, _ = _merge_fragments(mask)
+    if split_touching:
+        mask, _ = split_touching_mask(mask)
     mask = _cut_thin_lines(mask)
     n_lab, labels, stats, centroids = cv2.connectedComponentsWithStats(mask.astype(np.uint8), connectivity=8)
     H, W = mask.shape
@@ -138,7 +143,7 @@ def _winsorize(values):
 
 def calculate_phi_6_size_variance(image_path_or_array, alpha_area=ALPHA_A, alpha_ar=ALPHA_AR,
                                   robust="iqr", score="spec", alpha_height=ALPHA_H,
-                                  binarization="sauvola") -> dict:
+                                  binarization="sauvola", split_touching=True) -> dict:
     """단일 크롭 이미지의 φ₆ (크기·종횡비 분산).
 
     robust  "iqr"(기본, 면적·종횡비 중 하나라도 IQR 울타리 밖인 글자 제외) | "none"(정의 그대로)
@@ -150,7 +155,7 @@ def calculate_phi_6_size_variance(image_path_or_array, alpha_area=ALPHA_A, alpha
               num_valid_chars, chars(시각화용), components, reason
     """
     img = load_image(image_path_or_array)
-    comps, chars, frame = extract_characters(img, binarization)
+    comps, chars, frame = extract_characters(img, binarization, split_touching)
     result = {"phi_6": None, "cv_area": None, "cv_aspect_ratio": None, "cv_height": None,
               "areas": [], "aspect_ratios": [], "heights": [], "num_valid_chars": 0,
               "chars": chars, "components": comps, "robust": robust, "score": score, "reason": ""}

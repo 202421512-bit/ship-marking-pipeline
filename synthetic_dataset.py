@@ -158,7 +158,8 @@ def _hand_glyph(ch, rng, scale, base_r, tremor, tilt):
     return tile, start, end, pad
 
 
-def handwritten(text, rng, link_prob=None):
+def handwritten(text, rng, link_prob=None, touch_prob=0.0):
+    """touch_prob: 글자를 다음 글자와 겹치게(좁은 칸에 쓴 것처럼) 놓을 확률. 겹침 폭은 글자 폭의 15~35%."""
     from contour_roughness_feature import roughen_edges
 
     scale = rng.uniform(1.8, 2.3)
@@ -190,7 +191,10 @@ def handwritten(text, rng, link_prob=None):
             cv2.line(img, prev_end, (int(x + start[0]), int(y0 + start[1])), INK, max(2, int(base_r * 1.6)),
                      cv2.LINE_AA)
         prev_end = (int(x + end[0]), int(y0 + end[1]))
-        x += tw - 2 * pad + int(rng.uniform(4, 6 + 2 * jitter))
+        if rng.random() < touch_prob:
+            x += tw - 2 * pad - int(rng.uniform(0.15, 0.35) * (tw - 2 * pad))
+        else:
+            x += tw - 2 * pad + int(rng.uniform(4, 6 + 2 * jitter))
     img = img[:, : min(img.shape[1], x + 40)]
     return roughen_edges(img, amount=rng.uniform(0.1, 0.25), bleed=0.8, seed=int(rng.integers(1 << 30)),
                          background=BG, ink=INK)
