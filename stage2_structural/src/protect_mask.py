@@ -64,6 +64,7 @@ class ProtectResult:
     thin_lines: np.ndarray        # 보호하지 않은 가는 직선 (스크래치 후보, 참고용)
     thick_lines: np.ndarray       # 굵은 직선 (의심 영역에 포함됨, 참고용)
     weak: np.ndarray              # 흐린 획 후보 (의심 영역에 포함됨, 참고용)
+    attached: np.ndarray = None   # 글자에 딸린 가는 선(화살표·밑줄 등, 의심 영역에 포함됨)
     info: dict = field(default_factory=dict)
 
     @property
@@ -259,4 +260,4 @@ def build_protect_mask(img_bgr, protect_boxes=None, cfg=None):
         "area_ratio": {"strong": round(float(strong.mean()), 5), "suspect": round(float(suspect.mean()), 5)},
     }
     return ProtectResult(strong=strong, suspect=suspect, thin_lines=thin_lines, thick_lines=thick_lines,
-                         weak=weak, info=info)
+                         weak=weak, attached=attached_lines, info=info)

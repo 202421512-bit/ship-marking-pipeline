@@ -6,11 +6,17 @@ evaluate_stage2.py
 무엇을 재나 (모든 기준값은 [우리 설정], 파일 위쪽 EVAL_CFG에 모아 둠)
 
   A. 스크래치 '검출' 성능   detect_mask  vs  gt_scratch
+     - 픽셀 단위: det_P / det_R / det_F1 (허용 거리 버전 *_tol)
+     - 선분 단위: seg_det_P / seg_det_R / seg_det_F1
+         재현율 = 정답 스크래치 중 픽셀의 50% 이상이 검출된 것의 비율
+         정밀도 = 검출 선분 중 표본점의 50% 이상이 정답 스크래치 위인 것의 비율 (검출기가 선분 좌표를 줄 때)
   B. 스크래치 '제거' 성능   remove_mask  vs  제거해야 할 픽셀(= gt_scratch − gt_protect)
      → 이미 손상된 획 픽셀(gt_preexisting_damage)은 '제거 대상'에서 뺀다.
        지우면 그 자리의 획 정보까지 사라지므로, 남겨 두는 것이 보수적 설계의 정답.
      A와 B를 따로 재므로 "찾았지만 일부러 안 지움"을 구분할 수 있다.
      정밀도/재현율은 가는 선의 1~2px 어긋남을 감안해 허용 거리(tol_px) 기준으로도 함께 낸다.
+     - 픽셀 단위: rem_P / rem_R / rem_F1 (*_tol)
+     - 선분 단위: seg_rem_R80 = 지워야 할 픽셀이 있는 정답 스크래치 중 그 픽셀의 80% 이상을 지운 비율
 
   C. 보호 대상(문자·기호·직선 마킹) 보존
      - 알고리즘이 추가로 만든 손상: 입력에서 온전했던 보호 픽셀(gt_protect_intact) 중
@@ -21,7 +27,8 @@ evaluate_stage2.py
      - 반사로 가려진 보호 픽셀은 분모에서 빼고 따로 센다 (원래 정보가 없음)
 
   D. 반사 영역 표시 성능   glare_mask vs gt_glare (반사 있는 이미지), 반사 없는 이미지의 오검출 면적
-  E. needs_check 비율, 불확실 영역 면적
+  E. needs_check: 위험 이미지(스크래치가 보호 대상과 겹쳐 이미 손상이 있는 이미지) 중 확인 요청한 비율(재현율),
+     위험하지 않은 이미지 중 확인 요청한 비율(불필요 요청률). 불확실 영역 면적.
   F. 처리 시간 (장당 초)
   G. (선택) OCR CER: ocr_fn을 넘기면 처리 전/후 이미지의 마킹 박스를 잘라 인식하고 CER 비교
        ocr_fn(crops: list[np.ndarray]) -> list[str]
@@ -41,7 +48,7 @@ import time
 import cv2
 import numpy as np
 
-from make_stage2_samples import CONDITIONS, DATA_DIR, ROOT
+from make_stage2_samples import CONDITIONS, DATA_DIR, ROOT, scratch_layer
 from stage2_io import Stage2Result, empty_result
 
 EVAL_CFG = {
@@ -157,7 +164,42 @@ def evaluate_one(img, gt, meta, res: Stage2Result, cfg=EVAL_CFG, ocr_fn=None):
     else:
         r["glare_P"] = r["glare_R"] = r["glare_F1"] = None
         r["glare_false_px_noglare_img"] = int(res.glare_mask.sum())
+    # A'. 선분 단위 검출·제거
+    k = np.ones((2 * tol + 1, 2 * tol + 1), np.uint8)
+    det_d = cv2.dilate(res.detect_mask.astype(np.uint8), k) > 0
+    rem_d = cv2.dilate(res.remove_mask.astype(np.uint8), k) > 0
+    gt_scr_d = cv2.dilate(gt["gt_scratch"].astype(np.uint8), k) > 0
+    found, rem_ok, rem_total = 0, 0, 0
+    scr_list = meta.get("scratches", [])
+    for sc in scr_list:
+        sm = scratch_layer(sc["p0"], sc["p1"], sc["width_px"]) > 127
+        if sm.sum() == 0:
+            continue
+        found += int((sm & det_d).sum() >= 0.5 * sm.sum())
+        sr = sm & ~gt["gt_protect"]
+        if sr.sum() > 0:
+            rem_total += 1
+            rem_ok += int((sr & rem_d).sum() >= 0.8 * sr.sum())
+    r["seg_det_R"] = found / len(scr_list) if scr_list else None
+    r["seg_rem_R80"] = rem_ok / rem_total if rem_total else None
+    preds = [c for c in res.report.get("candidates", []) if "p0" in c and "p1" in c]
+    if preds:
+        good = 0
+        for c in preds:
+            n = int(max(abs(c["p1"][0] - c["p0"][0]), abs(c["p1"][1] - c["p0"][1]))) + 1
+            xs = np.clip(np.linspace(c["p0"][0], c["p1"][0], n).round().astype(int), 0, img.shape[1] - 1)
+            ys = np.clip(np.linspace(c["p0"][1], c["p1"][1], n).round().astype(int), 0, img.shape[0] - 1)
+            good += int(gt_scr_d[ys, xs].mean() >= 0.5)
+        r["seg_det_P"] = good / len(preds)
+    else:
+        r["seg_det_P"] = None if not res.detect_mask.any() else 0.0
+    sp, sr_ = r["seg_det_P"], r["seg_det_R"]
+    r["seg_det_F1"] = (2 * sp * sr_ / (sp + sr_)) if (sp is not None and sr_ is not None and sp + sr_ > 0) else (
+        0.0 if sr_ is not None else None)
+    ver = res.report.get("verification", {})
+    r["alg_protected_changed_px"] = ver.get("protected_pixels_changed")
     # E. 확인 필요 / 불확실
+    r["risk_image"] = bool(pre.any())
     r["needs_check"] = bool(res.needs_check)
     r["uncertain_px"] = int(res.uncertain_mask.sum())
     r["uncertain_on_scratch_px"] = int((res.uncertain_mask & gt["gt_scratch"]).sum())
@@ -204,7 +246,14 @@ def method_oracle_remove_all(img, protect_boxes=None, gt=None):
     return res
 
 
+def method_stage2(img, protect_boxes=None, gt=None):
+    """실제 2차 알고리즘 (정답을 보지 않음)."""
+    from pipeline import run_stage2
+    return run_stage2(img, protect_boxes)
+
+
 METHODS = {
+    "stage2": method_stage2,
     "identity": method_identity,
     "oracle_conservative": method_oracle_conservative,
     "oracle_remove_all": method_oracle_remove_all,
@@ -223,7 +272,7 @@ def summarize(rows):
             continue
         s = {"condition": cond, "n_images": len(sub)}
         for k in sub[0]:
-            if k in ("seed", "condition", "has_glare", "path") or k.startswith("_"):
+            if k in ("seed", "condition", "has_glare", "path", "risk_image") or k.startswith("_"):
                 continue
             vals = [r[k] for r in sub if r.get(k) is not None]
             if not vals:
@@ -232,6 +281,11 @@ def summarize(rows):
                 s[k] = int(sum(vals))
             else:
                 s[k] = round(float(np.mean(vals)), 4)
+        risk = [r for r in sub if r.get("risk_image")]
+        safe = [r for r in sub if not r.get("risk_image")]
+        s["needs_check_recall_on_risk"] = round(float(np.mean([r["needs_check"] for r in risk])), 4) if risk else None
+        s["needs_check_rate_on_safe"] = round(float(np.mean([r["needs_check"] for r in safe])), 4) if safe else None
+        s["n_risk_images"], s["n_safe_images"] = len(risk), len(safe)
         if "_cer_before_edits" in sub[0]:
             for tag in ("before", "after"):
                 s[f"cer_{tag}_micro"] = round(sum(r[f"_cer_{tag}_edits"] for r in sub) /
@@ -286,10 +340,12 @@ def run(method, split="dev", data_root=DATA_DIR, out_dir=None, ocr_fn=None, use_
 
 
 def print_summary(summary):
-    cols = [("condition", "조건"), ("det_F1_tol", "검출F1"), ("rem_F1_tol", "제거F1"),
-            ("preserve_rate_measured", "획보존율"), ("algo_damage_measured_px", "알고리즘손상px"),
-            ("preexisting_removed_px", "기존손상지움px"), ("glare_F1", "반사F1"),
-            ("needs_check", "확인필요비율"), ("time_s", "초/장")]
+    cols = [("condition", "조건"), ("det_F1_tol", "검출F1px"), ("seg_det_F1", "검출F1선분"),
+            ("rem_R_tol", "제거R_px"), ("seg_rem_R80", "제거R_선분"),
+            ("algo_damage_measured_px", "획손상px"), ("alg_protected_changed_px", "보호변경px"),
+            ("preexisting_removed_px", "기존손상지움px"), ("needs_check", "확인필요비율"),
+            ("needs_check_recall_on_risk", "위험검출률"), ("needs_check_rate_on_safe", "불필요요청률"),
+            ("time_s", "초/장")]
     print("  ".join(f"{h:>10s}" for _, h in cols))
     for s in summary:
         print("  ".join(f"{str(s.get(k) if s.get(k) is not None else '-'):>10s}" for k, _ in cols))

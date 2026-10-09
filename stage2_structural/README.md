@@ -11,7 +11,7 @@
 | 1 | 평가용 가상 데이터 생성기 (`src/make_stage2_samples.py`) | 완료 |
 | 2 | 평가 코드 (`src/evaluate_stage2.py`, 인터페이스 `src/stage2_io.py`) | 완료 |
 | 3 | 문자 보호 마스크 (`src/protect_mask.py`, 평가 `src/eval_protect.py`) | 완료 |
-| 4 | 스크래치 검출 + 보수적 판정 + 선택적 제거 | 예정 |
+| 4 | 스크래치 검출 + 공통 3단 판정 + 선택적 제거 (`detectors/scratch.py`, `decision.py`, `pipeline.py`) | 완료 (MVP) |
 | 5 | 반사 영역 표시 | 예정 |
 | 6 | 파라미터 실험 · ablation | 예정 |
 
@@ -82,3 +82,31 @@ python stage2_structural/src/eval_protect.py --polarity dark # 어두운 마킹 
 - 그 외(선 분리, 글자다움 규칙, 흐린 획 검출, 글자에 딸린 선 처리, 모든 임계값)는 [우리 선택]이며 `PROTECT_CFG`에 있습니다.
 - **주의:** `attach_radius`·`attach_frac`(화살표 등 글자에 딸린 선 판정)은 우리 생성기의 화살표 배치를 보고 정한 값이라,
   실제 현장 기호 배치에서는 다시 확인해야 합니다.
+
+## 4단계: 스크래치 검출 + 공통 3단 판정 + 선택적 제거
+
+```
+python stage2_structural/src/evaluate_stage2.py --method stage2 --split dev    # 개발용 평가
+python stage2_structural/src/make_stage2_samples.py --split eval --n 10        # 독립 평가 데이터 (처음 한 번)
+python stage2_structural/src/evaluate_stage2.py --method stage2 --split eval   # 독립 평가
+python stage2_structural/src/sweep_stage2.py                                    # 안전 거리·needs_check 반경 비교
+python stage2_structural/src/preview_stage2_result.py                           # 결과 미리보기
+```
+코드에서 사용:  `from pipeline import run_stage2; result = run_stage2(image_bgr, protect_boxes=None)`
+
+### 실험 파라미터 (dev에서 정함 → eval로 검증)
+| 파라미터 | 값 | 위치 |
+|---|---|---|
+| top-hat 크기 | 9, 21 px (@1600) | `SCRATCH_CFG` |
+| 후보 인정: 신호/잡음, 길이 | ≥ 6, ≥ 100 px | `SCRATCH_CFG` |
+| 확실 판정: 신호/잡음, 길이, 연속성, 폭 변동계수 | ≥ 8, ≥ 150 px, ≥ 0.8, ≤ 0.5 (폭 4px 이상만) | `SCRATCH_CFG` |
+| 마킹과 닮음 | 마킹과 같은 밝기 방향 + (폭 ≥ 획 폭×0.6 또는 주변 마킹과 LAB 거리 ≤ 25) | `SCRATCH_CFG` |
+| 안전 거리 | 4 px (@1600), 획 폭 비례 옵션 `safety_stroke_ratio` | `DECISION_CFG` |
+| 최소 제거 조각 | 20 px (@1600) | `DECISION_CFG` |
+| needs_check 반경 | 20 px (@1600), '확실한 보호' 기준 | `DECISION_CFG` |
+
+### 보장과 목표의 구분
+- **보장(코드로 강제, 테스트로 확인):** 알고리즘이 보호 영역(확실한 보호 ∪ 의심 영역)으로 판단한 픽셀과 '제거'로 선언하지 않은 픽셀은
+  inpaint 후 원본으로 되돌린다 (`report.verification.protected_pixels_changed == 0`).
+- **목표(실험 결과로만 확인):** 정답 기준 획 손상 0px. 보호 마스크가 획을 놓치면 손상이 생길 수 있다 (eval에서 1px 발생).
+- **C3(구분 어려움)에서 제거율이 낮은 것은 의도된 동작**이다. 획과 닮은 선은 지우지 않고 불확실로 표시한다.
